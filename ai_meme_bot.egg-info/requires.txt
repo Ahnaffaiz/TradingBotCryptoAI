@@ -1,0 +1,10 @@
+aiohttp>=3.9
+aiosqlite>=0.20
+python-dotenv>=1.0
+python-telegram-bot<23,>=20
+websockets>=12
+hermes-agent @ git+https://github.com/NousResearch/hermes-agent.git
+
+[dev]
+pytest>=8
+pytest-asyncio>=0.23

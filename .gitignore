@@ -1,0 +1,7 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+ai_meme_bot/database.db
+.venv/.ai_meme_bot_deps_ready
