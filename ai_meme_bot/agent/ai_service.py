@@ -130,6 +130,13 @@ class TradingAIService:
 
         prompt = {
             "task": "Evaluate whether a paper trader may buy this PumpSwap candidate.",
+            "strategy": (
+                "Short-term memecoin scalp mode. These tokens are volatile, low-volume, "
+                "and rug-prone, so do not require blue-chip confidence scores. Prefer "
+                "BUY only when the candidate shows a tradable 10-25% pullback/dip, "
+                "recovering buy pressure, usable liquidity, and no strong rug/scam "
+                "warning. Skip pumps that are already extended without a dip."
+            ),
             "candidate": snapshot.prompt_payload(),
             "latest_rules": rules or "No learned rules yet.",
             "response_schema": {
@@ -161,6 +168,12 @@ class TradingAIService:
 
         prompt = {
             "task": "Evaluate whether this open paper position should close now.",
+            "strategy": (
+                "Short-term memecoin scalp mode. Prefer protecting profit over long "
+                "holds. Close quickly when a position has a useful gain, sell pressure "
+                "appears, volume fades, rug/scam language appears, or the trade is "
+                "aging past a 30m, 1h, or 1d scalp window."
+            ),
             "trade": _trade_prompt_payload(trade),
             "current_snapshot": snapshot.prompt_payload(),
             "latest_rules": rules or "No learned rules yet.",
@@ -207,7 +220,7 @@ class TradingAIService:
             "response_schema": {
                 "rules": ["strict rule 1", "strict rule 2", "strict rule 3"],
                 "settings": {
-                    "entry_score_threshold": "integer 60..95",
+                    "entry_score_threshold": "integer 10..95",
                     "tracker_poll_seconds": "number 10..300",
                     "base_trade_amount": "number 0.01..2.0",
                     "position_review_seconds": "number 15..300",
@@ -248,13 +261,14 @@ class TradingAIService:
     ) -> ReflectionRules:
         """Compatibility helper for tests and rule-only callers."""
 
-        settings = StrategySettings(80, 30.0, 0.1, 45.0, "00:00")
+        settings = StrategySettings(25, 30.0, 0.1, 45.0, "00:00")
         return (await self.generate_reflection(evidence, settings)).rules
 
 
 def _system_prompt() -> str:
     return (
-        "You are a cautious paper-trading risk evaluator for volatile Solana tokens. "
+        "You are a cautious short-term paper-trading risk evaluator for volatile "
+        "Solana memecoins. "
         "Return only one JSON object matching the requested schema. Treat missing "
         "metrics as unknown and never invent holder or developer data."
     )
@@ -302,7 +316,7 @@ def _validated_settings(payload: Any) -> Optional[StrategySettings]:
         reflection_time = str(payload["reflection_time"]).strip()
     except (KeyError, TypeError, ValueError):
         return None
-    if not 60 <= threshold <= 95:
+    if not 10 <= threshold <= 95:
         return None
     if not 10 <= tracker_poll <= 300:
         return None

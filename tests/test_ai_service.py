@@ -96,7 +96,7 @@ async def test_reflection_accepts_only_bounded_strategy_settings():
             ]
         )
     )
-    defaults = StrategySettings(80, 30.0, 0.1, 45.0, "00:00")
+    defaults = StrategySettings(25, 30.0, 0.1, 45.0, "00:00")
 
     tuned = await service.generate_reflection(evidence, defaults)
     rejected = await service.generate_reflection(evidence, defaults)

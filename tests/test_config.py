@@ -13,6 +13,7 @@ def _clear_ai_env(monkeypatch):
         "AI_API_KEY",
         "AI_MODEL",
         "DB_PATH",
+        "ENTRY_SCORE_THRESHOLD",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -28,6 +29,7 @@ def test_custom_provider_config_and_safe_identity(monkeypatch, tmp_path):
     config = AppConfig.from_env()
 
     assert config.trading_mode == "PAPER"
+    assert config.entry_score_threshold == 25
     assert config.ai_identity == "custom:model-a"
     assert "do-not-print" not in config.ai_identity
 

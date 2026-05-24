@@ -27,7 +27,7 @@ def make_config(db_path: Path, **overrides) -> AppConfig:
         "position_review_seconds": 0.01,
         "min_liquidity_usd": 10000.0,
         "min_pair_age_seconds": 60,
-        "entry_score_threshold": 80,
+        "entry_score_threshold": 25,
         "reflection_time": "00:00",
         "reflection_timezone": "UTC",
     }

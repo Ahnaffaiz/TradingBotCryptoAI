@@ -16,6 +16,11 @@ class BuyAI:
         return TokenEvaluation(score=95, decision="buy", rationale="paper entry")
 
 
+class ThresholdBuyAI:
+    async def evaluate_entry(self, _snapshot, _rules):
+        return TokenEvaluation(score=25, decision="buy", rationale="paper entry")
+
+
 class BuyTools:
     async def trigger_buy(self, _token_address, _snapshot):
         return TradeResult(True, "Opened paper trade.")
@@ -64,4 +69,27 @@ async def test_discovery_reports_analysis_before_buy_result(tmp_path):
     assert notifier.events == [
         ("analysis", "mint-1", 95),
         ("buy", "mint-1", 95, None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_discovery_buys_when_score_meets_threshold(tmp_path):
+    config = make_config(tmp_path / "trades.db", entry_score_threshold=25)
+    database = Database(config.db_path)
+    await database.init_db()
+    await database.set_auto_trading(True)
+    notifier = CaptureNotifier()
+
+    await run_discovery_loop(
+        database,
+        OneSnapshotTracker(),
+        ThresholdBuyAI(),
+        BuyTools(),
+        config,
+        notifier,
+    )
+
+    assert notifier.events == [
+        ("analysis", "mint-1", 25),
+        ("buy", "mint-1", 25, None),
     ]

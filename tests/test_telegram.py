@@ -2,7 +2,7 @@ import pytest
 
 from ai_meme_bot.agent.hermes_bot import TelegramPaperNotifier, TelegramTradingBot
 from ai_meme_bot.core.database import Database
-from ai_meme_bot.models import TokenEvaluation, TradeResult
+from ai_meme_bot.models import StrategySettings, TokenEvaluation, TradeResult
 from tests.helpers import make_config, make_snapshot
 
 
@@ -61,11 +61,32 @@ async def test_status_redacts_api_key_and_auto_handlers_toggle_state(tmp_path):
     assert "secret-key" not in status
     assert "Auto entries:</b> 🟢 ON" in status
     assert "Reports:</b> 🔔 ON in this chat" in status
+    assert "Entry threshold:</b> score ≥ 25" in status
     assert await database.get_auto_trading() is False
     assert await database.get_notification_chat_id() == 94721
     assert "Auto entries enabled" in update.effective_message.replies[0][0]
     assert "Auto entries paused" in update.effective_message.replies[1][0]
     assert update.effective_message.replies[0][1]["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_threshold_command_updates_live_strategy_settings(tmp_path):
+    config = make_config(tmp_path / "trades.db", entry_score_threshold=80)
+    database = Database(config.db_path)
+    await database.init_db()
+    bot = TelegramTradingBot(config, database)
+    update = FakeUpdate()
+
+    await bot.threshold(update, FakeContext([]))
+    await bot.threshold(update, FakeContext(["25/100"]))
+    await bot.threshold(update, FakeContext(["101"]))
+
+    assert await database.get_strategy_settings(config.strategy_defaults) == (
+        StrategySettings(25, 0.01, 1.0, 0.01, "00:00")
+    )
+    assert "Use <code>/threshold 25</code>" in update.effective_message.replies[0][0]
+    assert "Entry threshold updated" in update.effective_message.replies[1][0]
+    assert "Invalid threshold" in update.effective_message.replies[2][0]
 
 
 @pytest.mark.asyncio

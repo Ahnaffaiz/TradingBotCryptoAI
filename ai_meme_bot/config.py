@@ -129,7 +129,7 @@ class AppConfig:
             "SOLANA_RPC_URL", ""
         ).strip()
 
-        entry_threshold = _int_env("ENTRY_SCORE_THRESHOLD", 80)
+        entry_threshold = _int_env("ENTRY_SCORE_THRESHOLD", 25)
         if entry_threshold < 0 or entry_threshold > 100:
             raise ConfigError("ENTRY_SCORE_THRESHOLD must be between 0 and 100.")
 

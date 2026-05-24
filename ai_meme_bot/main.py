@@ -57,7 +57,10 @@ async def run_discovery_loop(
             )
             await notifier.entry_analysis(snapshot, evaluation)
             settings = await database.get_strategy_settings(config.strategy_defaults)
-            if evaluation.wants_buy and evaluation.score > settings.entry_score_threshold:
+            if (
+                evaluation.wants_buy
+                and evaluation.score >= settings.entry_score_threshold
+            ):
                 result = await tools.trigger_buy(snapshot.token_address, snapshot)
                 if result.success:
                     await database.mark_analysis_bought(analysis_id, result.trade_id)

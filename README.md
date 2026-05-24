@@ -59,6 +59,7 @@ Telegram commands:
 - `/status` shows mode, configured AI model, paper balance, and trades.
 - `/auto_on` allows new AI-approved paper entries.
 - `/auto_off` stops new entries while open trades remain under review.
+- `/threshold <0-100>` changes the live buy score threshold, for example `/threshold 25`.
 - `/notify_on` enables Telegram reports.
 - `/notify_off` mutes Telegram reports.
 - `/hermes <task>` runs the opt-in admin workspace operator.
@@ -90,7 +91,7 @@ See [`ai_meme_bot/.env.example`](ai_meme_bot/.env.example). Important defaults:
 - `BASE_TRADE_AMOUNT=0.1`
 - `MIN_LIQUIDITY_USD=10000`
 - `MIN_PAIR_AGE_SECONDS=60`
-- `ENTRY_SCORE_THRESHOLD=80`
+- `ENTRY_SCORE_THRESHOLD=25`
 
 Paper trading does not require a Pump.fun RPC, wallet key, or Jito setup. Dexscreener
 provides discovery and pair pricing. `HELIUS_RPC_URL` or `SOLANA_RPC_URL` is optional
@@ -133,7 +134,8 @@ correct skips, missed winners, tokens rejected by base filters, and recurring er
 activity. The AI writes three strict rules back into the active prompt and may tune
 paper-mode runtime settings within app limits: entry score threshold, discovery poll
 cadence, paper trade size, exit review cadence, and next reflection wall-clock time.
-Invalid or out-of-range tuning output is ignored.
+The entry score threshold starts at 25/100 and can be changed without restarting
+from Telegram. Invalid or out-of-range tuning output is ignored.
 
 ## Tests
 

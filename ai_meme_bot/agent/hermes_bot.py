@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from html import escape
 import logging
 from typing import Any, List, Optional, Protocol
@@ -27,6 +28,7 @@ MENU_AUTO_ON = "🟢 Auto On"
 MENU_AUTO_OFF = "🔴 Auto Off"
 MENU_NOTIFY_ON = "🔔 Notify On"
 MENU_NOTIFY_OFF = "🔕 Notify Off"
+MENU_THRESHOLD = "🎚 Threshold"
 
 
 class PaperNotifier(Protocol):
@@ -186,6 +188,8 @@ class TelegramTradingBot:
         application.add_handler(CommandHandler("status", self.status))
         application.add_handler(CommandHandler("auto_on", self.auto_on))
         application.add_handler(CommandHandler("auto_off", self.auto_off))
+        application.add_handler(CommandHandler("threshold", self.threshold))
+        application.add_handler(CommandHandler("set_threshold", self.threshold))
         application.add_handler(CommandHandler("notify_on", self.notify_on))
         application.add_handler(CommandHandler("notify_off", self.notify_off))
         application.add_handler(CommandHandler("hermes", self.hermes))
@@ -197,6 +201,9 @@ class TelegramTradingBot:
         )
         application.add_handler(
             MessageHandler(filters.Regex("^{0}$".format(MENU_AUTO_OFF)), self.auto_off)
+        )
+        application.add_handler(
+            MessageHandler(filters.Regex("^{0}$".format(MENU_THRESHOLD)), self.threshold)
         )
         application.add_handler(
             MessageHandler(filters.Regex("^{0}$".format(MENU_NOTIFY_ON)), self.notify_on)
@@ -266,6 +273,51 @@ class TelegramTradingBot:
             update,
             "🔴 <b>Auto entries paused</b>\n"
             "Open paper trades still receive exit analysis.",
+            reply_markup=menu_markup(),
+        )
+
+    async def threshold(self, update: Any, context: Any) -> None:
+        """Show or update the live paper-entry score threshold."""
+
+        await self._register_notification_chat(update)
+        settings = await self.database.get_strategy_settings(
+            self.config.strategy_defaults
+        )
+        args = getattr(context, "args", []) if context is not None else []
+        raw_value = " ".join(args or []).strip()
+        if not raw_value:
+            await _reply(
+                update,
+                "🎚 <b>Entry threshold:</b> score ≥ {0}\n"
+                "Use <code>/threshold 25</code> to change it live.".format(
+                    settings.entry_score_threshold
+                ),
+                reply_markup=menu_markup(),
+            )
+            return
+        threshold = _parse_score_threshold(raw_value)
+        if threshold is None:
+            await _reply(
+                update,
+                "⚠️ <b>Invalid threshold</b>\n"
+                "Send a whole number from <code>0</code> to <code>100</code>, "
+                "for example <code>/threshold 25</code>.",
+                reply_markup=menu_markup(),
+            )
+            return
+        updated = replace(settings, entry_score_threshold=threshold)
+        await self.database.set_strategy_settings(updated)
+        await self.database.add_activity(
+            "strategy_threshold",
+            "entry score threshold set to {0}".format(threshold),
+            payload={"entry_score_threshold": threshold},
+        )
+        await _reply(
+            update,
+            "✅ <b>Entry threshold updated</b>\n"
+            "The bot may now buy when AI decision is BUY and score ≥ {0}/100.".format(
+                threshold
+            ),
             reply_markup=menu_markup(),
         )
 
@@ -362,7 +414,7 @@ class TelegramTradingBot:
                 _report_state(notification_chat_id, notifications_enabled)
             ),
             "💰 <b>Paper balance:</b> {0:.6f} SOL".format(balance),
-            "🎚 <b>Entry threshold:</b> score &gt; {0}".format(
+            "🎚 <b>Entry threshold:</b> score ≥ {0}".format(
                 settings.entry_score_threshold
             ),
             "📦 <b>Trade size:</b> {0:.6f} SOL".format(settings.base_trade_amount),
@@ -394,6 +446,7 @@ class TelegramTradingBot:
                     BotCommand("status", "show paper trading status"),
                     BotCommand("auto_on", "enable paper auto entries"),
                     BotCommand("auto_off", "pause paper auto entries"),
+                    BotCommand("threshold", "set live buy score threshold"),
                     BotCommand("notify_on", "enable analysis reports"),
                     BotCommand("notify_off", "mute analysis reports"),
                     BotCommand("hermes", "admin workspace operator"),
@@ -590,7 +643,7 @@ def menu_text() -> str:
     return (
         "🎛 <b>Paper Bot Menu</b>\n"
         "📊 Check status, 🟢 enable entries, 🔴 pause entries,\n"
-        "🔔 receive reports, or 🔕 mute reports."
+        "🎚 inspect threshold, 🔔 receive reports, or 🔕 mute reports."
     )
 
 
@@ -601,7 +654,7 @@ def menu_markup() -> Any:
 
     return ReplyKeyboardMarkup(
         [
-            [MENU_STATUS],
+            [MENU_STATUS, MENU_THRESHOLD],
             [MENU_AUTO_ON, MENU_AUTO_OFF],
             [MENU_NOTIFY_ON, MENU_NOTIFY_OFF],
         ],
@@ -627,6 +680,21 @@ def _decision_label(decision: str) -> str:
         "hold": "🛡️ HOLD",
     }
     return labels.get(decision.lower(), _html(decision.upper()))
+
+
+def _parse_score_threshold(raw_value: str) -> Optional[int]:
+    value = raw_value.strip()
+    if value.endswith("%"):
+        value = value[:-1].strip()
+    if "/" in value:
+        value = value.split("/", 1)[0].strip()
+    try:
+        threshold = int(value)
+    except ValueError:
+        return None
+    if threshold < 0 or threshold > 100:
+        return None
+    return threshold
 
 
 def _report_state(chat_id: Optional[int], notifications_enabled: bool) -> str:

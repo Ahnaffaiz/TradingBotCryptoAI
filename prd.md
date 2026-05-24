@@ -50,7 +50,7 @@ DEXSCREENER_API_BASE=[https://api.dexscreener.com/latest/dex/tokens/](https://ap
 2.  **Base Filtering:** Drops tokens if `dexId` is not `pump`, if liquidity is < $10,000, or if token age < 1 minute (to avoid initial graduation dumps).
 3.  **Context Injection:** Passes surviving token data (5m volume, dev holding %, top 10 holders %) to the Hermes AI agent.
 4.  **AI Evaluation:** The Gemini LLM evaluates the metrics using a System Prompt enriched by daily RAG reflections. Returns a score (0-100).
-5.  **Decision:** If the score > 80, the AI triggers the `execute_trade` tool.
+5.  **Decision:** If the score meets the live entry threshold (25/100 by default), the AI triggers the `execute_trade` tool.
 
 ### B. Execution Workflow (Toggle Paper/Real)
 *   **If `TRADING_MODE=PAPER`:** 
