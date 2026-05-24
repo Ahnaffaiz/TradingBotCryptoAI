@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from html import escape
 import logging
+from pathlib import Path
+import re
 from typing import Any, List, Optional, Protocol
 
 from ai_meme_bot.config import AppConfig
 from ai_meme_bot.agent.ai_service import HermesChatBackend
 from ai_meme_bot.core.database import Database
+from ai_meme_bot.core.execution import TradeExecutor
+from ai_meme_bot.core.pnl_image import render_pnl_chart
 from ai_meme_bot.models import (
     ExitDecision,
     ReflectionRules,
     TokenEvaluation,
     TokenSnapshot,
+    TradePlan,
     TradeRecord,
     TradeResult,
 )
@@ -30,6 +36,7 @@ MENU_NOTIFY_ON = "🔔 Notify On"
 MENU_NOTIFY_OFF = "🔕 Notify Off"
 MENU_THRESHOLD = "🎚 Threshold"
 MENU_SETTINGS = "⚙️ Settings"
+MENU_HISTORY = "📜 History"
 
 
 class PaperNotifier(Protocol):
@@ -160,10 +167,14 @@ class TelegramTradingBot:
         config: AppConfig,
         database: Database,
         operator_backend: Optional[HermesChatBackend] = None,
+        tracker: Any = None,
+        executor: Optional[TradeExecutor] = None,
     ) -> None:
         self.config = config
         self.database = database
         self.operator_backend = operator_backend or HermesChatBackend(config)
+        self.tracker = tracker
+        self.executor = executor
 
     def build_application(self) -> Any:
         """Build the Telegram application when a token is configured."""
@@ -188,6 +199,13 @@ class TelegramTradingBot:
         application.add_handler(CommandHandler("menu", self.menu))
         application.add_handler(CommandHandler("status", self.status))
         application.add_handler(CommandHandler("settings", self.status))
+        application.add_handler(CommandHandler("history", self.history))
+        application.add_handler(CommandHandler("position", self.position))
+        application.add_handler(CommandHandler("pos", self.position))
+        application.add_handler(CommandHandler("close", self.close_position))
+        application.add_handler(CommandHandler("tp", self.take_profit_position))
+        application.add_handler(CommandHandler("sl", self.cut_loss_position))
+        application.add_handler(CommandHandler("cut_loss", self.cut_loss_position))
         application.add_handler(CommandHandler("auto_on", self.auto_on))
         application.add_handler(CommandHandler("auto_off", self.auto_off))
         application.add_handler(CommandHandler("threshold", self.threshold))
@@ -221,11 +239,29 @@ class TelegramTradingBot:
             MessageHandler(filters.Regex("^{0}$".format(MENU_SETTINGS)), self.status)
         )
         application.add_handler(
+            MessageHandler(filters.Regex("^{0}$".format(MENU_HISTORY)), self.history)
+        )
+        application.add_handler(
             MessageHandler(filters.Regex("^{0}$".format(MENU_NOTIFY_ON)), self.notify_on)
         )
         application.add_handler(
             MessageHandler(
                 filters.Regex("^{0}$".format(MENU_NOTIFY_OFF)), self.notify_off
+            )
+        )
+        application.add_handler(
+            MessageHandler(filters.Regex(r"^#?\d+$"), self.position)
+        )
+        application.add_handler(
+            MessageHandler(
+                filters.Regex(r"^(✅\s*)?(Take Profit|TP)\s+#?\d+$"),
+                self.take_profit_position,
+            )
+        )
+        application.add_handler(
+            MessageHandler(
+                filters.Regex(r"^(🛑\s*)?(Cut Loss|SL)\s+#?\d+$"),
+                self.cut_loss_position,
             )
         )
         return application
@@ -265,7 +301,71 @@ class TelegramTradingBot:
         """Send a concise runtime status report."""
 
         await self._register_notification_chat(update)
-        await _reply(update, await self.render_status(), reply_markup=menu_markup())
+        text = await self.render_status()
+        open_trades = await self.database.get_open_trades()
+        image_path = await self.render_pnl_image(open_trades)
+        reply_markup = position_menu_markup(open_trades)
+        if image_path is not None:
+            await _reply_photo(update, image_path, text, reply_markup=reply_markup)
+        else:
+            await _reply(update, text, reply_markup=reply_markup)
+
+    async def history(self, update: Any, context: Any) -> None:
+        """Show trading history, newest first."""
+
+        await self._register_notification_chat(update)
+        raw_value = _context_text(context)
+        limit = (
+            None
+            if raw_value.strip().lower() == "all"
+            else _parse_history_limit(raw_value)
+        )
+        if limit is None and raw_value.strip().lower() != "all":
+            await _reply(
+                update,
+                "⚠️ <b>Invalid history limit</b>\nUse <code>/history</code>, "
+                "<code>/history all</code>, or <code>/history 20</code>.",
+                reply_markup=menu_markup(),
+            )
+            return
+        trades = await self.database.get_trade_history(limit=limit)
+        await _reply(update, format_trade_history(trades), reply_markup=menu_markup())
+
+    async def position(self, update: Any, context: Any) -> None:
+        """Show one position by id."""
+
+        await self._register_notification_chat(update)
+        trade_id = _trade_id_from_update(update, context)
+        if trade_id is None:
+            await _reply(
+                update,
+                "🧾 <b>Position detail</b>\nUse <code>/position 1</code> "
+                "or type <code>#1</code>.",
+                reply_markup=position_menu_markup(await self.database.get_open_trades()),
+            )
+            return
+        text = await self.render_position_detail(trade_id)
+        trade = await self.database.get_trade(trade_id)
+        await _reply(
+            update,
+            text,
+            reply_markup=position_action_markup(trade) if trade else menu_markup(),
+        )
+
+    async def close_position(self, update: Any, context: Any) -> None:
+        """Manually close one open paper position."""
+
+        await self._manual_close(update, context, "manual close")
+
+    async def take_profit_position(self, update: Any, context: Any) -> None:
+        """Manually take profit on one open paper position."""
+
+        await self._manual_close(update, context, "manual take profit")
+
+    async def cut_loss_position(self, update: Any, context: Any) -> None:
+        """Manually cut loss on one open paper position."""
+
+        await self._manual_close(update, context, "manual cut loss")
 
     async def auto_on(self, update: Any, _context: Any) -> None:
         """Allow the discovery loop to open new AI-approved paper entries."""
@@ -561,6 +661,172 @@ class TelegramTradingBot:
             lines.extend(_format_closed_trades(closed_trades))
         return "\n".join(lines)
 
+    async def render_pnl_image(
+        self, open_trades: Optional[List[TradeRecord]] = None
+    ) -> Optional[Path]:
+        """Generate a status PnL chart image."""
+
+        try:
+            closed = list(reversed(await self.database.get_closed_trades(limit=60)))
+            open_rows = (
+                open_trades
+                if open_trades is not None
+                else await self.database.get_open_trades()
+            )
+            open_pnls = []
+            for trade in open_rows:
+                snapshot = await self._current_snapshot(trade)
+                if snapshot is not None:
+                    open_pnls.append(_unrealized_pnl(trade, snapshot.price_usd))
+            output_path = (
+                self.config.db_path.parent
+                / "pnl_charts"
+                / "paper_status_pnl.png"
+            )
+            return render_pnl_chart(
+                output_path,
+                [trade.pnl or 0.0 for trade in closed],
+                open_pnls,
+            )
+        except Exception as exc:
+            LOGGER.warning("PnL image generation failed: %s", exc)
+            return None
+
+    async def render_position_detail(self, trade_id: int) -> str:
+        """Render one position detail with current market condition when available."""
+
+        trade = await self.database.get_trade(trade_id)
+        if trade is None:
+            return "⚠️ <b>Position not found</b>\nNo trade with id <code>#{0}</code>.".format(
+                trade_id
+            )
+        snapshot = await self._current_snapshot(trade)
+        plan = _trade_plan_from_json(trade)
+        current_price = snapshot.price_usd if snapshot is not None else trade.sell_price
+        pnl = _unrealized_pnl(trade, current_price) if current_price else trade.pnl
+        pnl_pct = _pct_change(trade.buy_price, current_price) if current_price else None
+        lines = [
+            "🧾 <b>Position #{0}</b> {1}".format(trade.id, _html(trade.status)),
+            "🪙 <b>Token:</b> <code>{0}</code>".format(_html(trade.token_address)),
+            "🏁 <b>Entry:</b> ${0:.10g} | {1:.6f} SOL".format(
+                trade.buy_price, trade.entry_amount_sol
+            ),
+            "📦 <b>Quantity:</b> {0:.10g}".format(trade.token_quantity),
+            "🕒 <b>Opened:</b> {0}".format(_html(trade.opened_at)),
+        ]
+        if current_price:
+            lines.extend(
+                [
+                    "💵 <b>Current:</b> ${0:.10g}".format(current_price),
+                    "📊 <b>PnL:</b> {0} ({1})".format(
+                        _pnl_label(pnl), _metric(pnl_pct, "%")
+                    ),
+                ]
+            )
+        if snapshot is not None:
+            lines.extend(
+                [
+                    "💧 <b>Liquidity:</b> ${0:,.2f}".format(snapshot.liquidity_usd),
+                    "📈 <b>5m volume:</b> ${0:,.2f}".format(snapshot.volume_5m_usd),
+                    "🌊 <b>Trend:</b> 5m {0} | 1h {1}".format(
+                        _metric(snapshot.price_change_5m_pct, "%"),
+                        _metric(snapshot.price_change_1h_pct, "%"),
+                    ),
+                    "🔁 <b>5m txns:</b> buys {0} | sells {1}".format(
+                        _count(snapshot.buys_5m), _count(snapshot.sells_5m)
+                    ),
+                ]
+            )
+        lines.extend(
+            [
+                "🛡 <b>AI setup:</b> SL {0:g}% | TP {1} | trail {2:g}% | max {3}".format(
+                    plan.stop_loss_pct,
+                    _format_targets(plan.take_profit_targets_pct),
+                    plan.trailing_stop_pct,
+                    _duration_label(plan.max_hold_seconds),
+                ),
+                "📝 <b>Plan:</b> {0}".format(
+                    _html(plan.rationale or "No AI setup rationale stored.")
+                ),
+            ]
+        )
+        if trade.status == "OPEN":
+            lines.append("")
+            lines.append(
+                "Use <code>/tp {0}</code>, <code>/sl {0}</code>, or <code>/close {0}</code>.".format(
+                    trade.id
+                )
+            )
+        elif trade.exit_reason:
+            lines.append("🏁 <b>Exit:</b> {0}".format(_html(trade.exit_reason)))
+        return "\n".join(lines)
+
+    async def _manual_close(self, update: Any, context: Any, reason: str) -> None:
+        await self._register_notification_chat(update)
+        trade_id = _trade_id_from_update(update, context)
+        if trade_id is None:
+            await _reply(
+                update,
+                "⚠️ <b>Position id required</b>\nUse <code>/tp 1</code>, "
+                "<code>/sl 1</code>, or <code>/close 1</code>.",
+                reply_markup=position_menu_markup(
+                    await self.database.get_open_trades()
+                ),
+            )
+            return
+        trade = await self.database.get_trade(trade_id)
+        if trade is None or trade.status != "OPEN":
+            await _reply(
+                update,
+                "⚠️ <b>Open position not found</b>\nTrade <code>#{0}</code> is not open.".format(
+                    trade_id
+                ),
+                reply_markup=position_menu_markup(
+                    await self.database.get_open_trades()
+                ),
+            )
+            return
+        if self.executor is None or self.tracker is None:
+            await _reply(
+                update,
+                "⚠️ <b>Manual close unavailable</b>\nThe Telegram bot needs tracker "
+                "and executor services to close at current price.",
+                reply_markup=position_action_markup(trade),
+            )
+            return
+        snapshot = await self._current_snapshot(trade)
+        if snapshot is None:
+            await _reply(
+                update,
+                "⚠️ <b>Current price unavailable</b>\nCould not refresh this token.",
+                reply_markup=position_action_markup(trade),
+            )
+            return
+        result = await self.executor.close_trade(trade, snapshot, reason)
+        await self.database.add_activity(
+            "manual_sell" if result.success else "manual_sell_rejected",
+            result.message,
+            trade.token_address,
+            {"trade_id": trade.id, "pnl": result.pnl, "reason": reason},
+        )
+        decision = ExitDecision("close", reason)
+        await _reply(
+            update,
+            format_sell_result(trade, snapshot, decision, result),
+            reply_markup=position_menu_markup(await self.database.get_open_trades()),
+        )
+
+    async def _current_snapshot(self, trade: TradeRecord) -> Optional[TokenSnapshot]:
+        if self.tracker is None:
+            return None
+        try:
+            return await self.tracker.snapshot_for_token(
+                trade.token_address, apply_filters=False
+            )
+        except Exception as exc:
+            LOGGER.warning("Position snapshot failed for trade=%s: %s", trade.id, exc)
+            return None
+
     async def _post_init(self, application: Any) -> None:
         """Publish Telegram's slash-command menu after startup."""
 
@@ -573,6 +839,11 @@ class TelegramTradingBot:
                     BotCommand("whoami", "show Telegram user id"),
                     BotCommand("status", "show paper trading status"),
                     BotCommand("settings", "show strategy settings"),
+                    BotCommand("history", "show trading history"),
+                    BotCommand("position", "show position detail by id"),
+                    BotCommand("tp", "manually take profit by position id"),
+                    BotCommand("sl", "manually cut loss by position id"),
+                    BotCommand("close", "manually close position by id"),
                     BotCommand("auto_on", "enable paper auto entries"),
                     BotCommand("auto_off", "pause paper auto entries"),
                     BotCommand("launch_on", "enable launch scanner"),
@@ -719,10 +990,34 @@ async def _reply(update: Any, text: str, reply_markup: Any = None) -> None:
         )
 
 
+async def _reply_photo(
+    update: Any, image_path: Path, caption: str, reply_markup: Any = None
+) -> None:
+    message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+    if message is None:
+        return
+    short_caption = caption if len(caption) <= 1000 else "📊 <b>Paper PnL</b>"
+    try:
+        with image_path.open("rb") as image_file:
+            await message.reply_photo(
+                photo=image_file,
+                caption=short_caption,
+                parse_mode=PARSE_MODE,
+                reply_markup=reply_markup if short_caption == caption else None,
+            )
+        if short_caption != caption:
+            await _reply(update, caption, reply_markup=reply_markup)
+    except AttributeError:
+        await _reply(update, caption, reply_markup=reply_markup)
+
+
 def _format_open_trades(trades: List[TradeRecord]) -> List[str]:
     return [
-        "• #{0} <code>{1}</code> entry ${2:.10g}".format(
-            trade.id, _html(_short_token(trade.token_address)), trade.buy_price
+        "• #{0} <code>{1}</code> entry ${2:.10g} size {3:.6f} SOL".format(
+            trade.id,
+            _html(_short_token(trade.token_address)),
+            trade.buy_price,
+            trade.entry_amount_sol,
         )
         for trade in trades[:5]
     ]
@@ -743,11 +1038,29 @@ def _short_token(token_address: str) -> str:
     return "{0}...{1}".format(token_address[:7], token_address[-5:])
 
 
+def format_trade_history(trades: List[TradeRecord]) -> str:
+    if not trades:
+        return "📜 <b>Trading History</b>\nNo paper trades yet."
+    lines = ["📜 <b>Trading History</b>"]
+    for trade in trades:
+        pnl = _pnl_label(trade.pnl)
+        lines.append(
+            "• #{0} {1} <code>{2}</code> entry ${3:.10g} size {4:.6f} SOL PnL {5}".format(
+                trade.id,
+                _html(trade.status),
+                _html(_short_token(trade.token_address)),
+                trade.buy_price,
+                trade.entry_amount_sol,
+                pnl,
+            )
+        )
+    return "\n".join(lines[:80])
+
+
 def format_entry_analysis(snapshot: TokenSnapshot, evaluation: TokenEvaluation) -> str:
     """Format one candidate review before any paper buy."""
 
-    return "\n".join(
-        [
+    lines = [
             "{0} <b>Paper Entry Analysis</b>".format(_entry_icon(evaluation)),
             "🎯 <b>Strategy:</b> {0}".format(_html(snapshot.strategy.upper())),
             "🪙 <b>Token:</b> <code>{0}</code>".format(_html(snapshot.token_address)),
@@ -786,7 +1099,21 @@ def format_entry_analysis(snapshot: TokenSnapshot, evaluation: TokenEvaluation) 
                 _html(evaluation.rationale or "No rationale returned.")
             ),
         ]
-    )
+    if evaluation.trade_plan is not None:
+        lines.extend(
+            [
+                "📦 <b>AI size:</b> {0:.6f} SOL".format(
+                    evaluation.trade_plan.entry_amount_sol
+                ),
+                "🛡 <b>AI setup:</b> SL {0:g}% | TP {1} | trail {2:g}% | max {3}".format(
+                    evaluation.trade_plan.stop_loss_pct,
+                    _format_targets(evaluation.trade_plan.take_profit_targets_pct),
+                    evaluation.trade_plan.trailing_stop_pct,
+                    _duration_label(evaluation.trade_plan.max_hold_seconds),
+                ),
+            ]
+        )
+    return "\n".join(lines)
 
 
 def format_buy_result(
@@ -806,6 +1133,11 @@ def format_buy_result(
             ),
             "🧠 <b>AI score:</b> {0}/100".format(evaluation.score),
             "🎯 <b>Strategy:</b> {0}".format(_html(snapshot.strategy.upper())),
+            "📦 <b>AI size:</b> {0}".format(
+                "{0:.6f} SOL".format(evaluation.trade_plan.entry_amount_sol)
+                if evaluation.trade_plan
+                else "default"
+            ),
             "ℹ️ <b>Detail:</b> {0}".format(_html(result.message)),
         ]
     )
@@ -892,7 +1224,7 @@ def menu_text() -> str:
     return (
         "🎛 <b>Paper Bot Menu</b>\n"
         "📊 Check status, 🟢 enable entries, 🔴 pause entries,\n"
-        "🎚 inspect threshold, ⚙️ settings, 🔔 reports, or 🔕 mute."
+        "🎚 inspect threshold, 📜 history, ⚙️ settings, 🔔 reports, or 🔕 mute."
     )
 
 
@@ -903,13 +1235,55 @@ def menu_markup() -> Any:
 
     return ReplyKeyboardMarkup(
         [
-            [MENU_STATUS, MENU_THRESHOLD, MENU_SETTINGS],
+            [MENU_STATUS, MENU_HISTORY, MENU_SETTINGS],
+            [MENU_THRESHOLD],
             [MENU_AUTO_ON, MENU_AUTO_OFF],
             [MENU_NOTIFY_ON, MENU_NOTIFY_OFF],
         ],
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="Choose a paper bot action",
+    )
+
+
+def position_menu_markup(open_trades: List[TradeRecord]) -> Any:
+    """Build a menu that exposes open position ids as direct buttons."""
+
+    from telegram import ReplyKeyboardMarkup
+
+    position_rows = [
+        ["#{0}".format(trade.id) for trade in open_trades[index : index + 3]]
+        for index in range(0, len(open_trades), 3)
+    ]
+    rows = [
+        [MENU_STATUS, MENU_HISTORY, MENU_SETTINGS],
+        *position_rows,
+        [MENU_AUTO_ON, MENU_AUTO_OFF],
+        [MENU_NOTIFY_ON, MENU_NOTIFY_OFF],
+    ]
+    return ReplyKeyboardMarkup(
+        rows,
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Choose status or a position id",
+    )
+
+
+def position_action_markup(trade: Optional[TradeRecord]) -> Any:
+    """Build manual action buttons for one selected position."""
+
+    if trade is None or trade.status != "OPEN":
+        return menu_markup()
+    from telegram import ReplyKeyboardMarkup
+
+    return ReplyKeyboardMarkup(
+        [
+            ["✅ Take Profit #{0}".format(trade.id), "🛑 Cut Loss #{0}".format(trade.id)],
+            [MENU_STATUS, MENU_HISTORY],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
+        input_field_placeholder="Choose a manual action",
     )
 
 
@@ -944,6 +1318,26 @@ def _parse_score_threshold(raw_value: str) -> Optional[int]:
     if threshold < 0 or threshold > 100:
         return None
     return threshold
+
+
+def _parse_history_limit(raw_value: str) -> Optional[int]:
+    value = raw_value.strip().lower()
+    if not value:
+        return 50
+    try:
+        limit = int(value)
+    except ValueError:
+        return None
+    return max(1, min(500, limit))
+
+
+def _trade_id_from_update(update: Any, context: Any) -> Optional[int]:
+    raw_value = _context_text(context)
+    if not raw_value:
+        message = getattr(update, "effective_message", None) or getattr(update, "message", None)
+        raw_value = str(getattr(message, "text", "") or "")
+    match = re.search(r"#?(\d+)", raw_value)
+    return int(match.group(1)) if match else None
 
 
 def _context_text(context: Any) -> str:
@@ -994,6 +1388,69 @@ def _report_state(chat_id: Optional[int], notifications_enabled: bool) -> str:
     if chat_id is None:
         return "⚪ send /start"
     return "🔔 ON in this chat" if notifications_enabled else "🔕 MUTED"
+
+
+def _trade_plan_from_json(trade: TradeRecord) -> TradePlan:
+    fallback = TradePlan(
+        entry_amount_sol=trade.entry_amount_sol,
+        stop_loss_pct=8.0,
+        take_profit_targets_pct=[],
+        trailing_stop_pct=0.0,
+        max_hold_seconds=3600.0,
+    )
+    try:
+        payload = json.loads(trade.trade_plan_json or "{}")
+    except (TypeError, ValueError):
+        return fallback
+    if not isinstance(payload, dict):
+        return fallback
+    try:
+        targets = payload.get("take_profit_targets_pct") or []
+        if not isinstance(targets, list):
+            targets = []
+        return TradePlan(
+            entry_amount_sol=float(
+                payload.get("entry_amount_sol", trade.entry_amount_sol)
+            ),
+            stop_loss_pct=float(payload.get("stop_loss_pct", fallback.stop_loss_pct)),
+            take_profit_targets_pct=[float(target) for target in targets],
+            trailing_stop_pct=float(
+                payload.get("trailing_stop_pct", fallback.trailing_stop_pct)
+            ),
+            max_hold_seconds=float(
+                payload.get("max_hold_seconds", fallback.max_hold_seconds)
+            ),
+            rationale=str(payload.get("rationale", "")),
+        )
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _format_targets(targets: List[float]) -> str:
+    if not targets:
+        return "not set"
+    return " | ".join(
+        "TP{0} {1:g}%".format(index + 1, target)
+        for index, target in enumerate(targets)
+    )
+
+
+def _unrealized_pnl(trade: TradeRecord, current_price: Optional[float]) -> Optional[float]:
+    if current_price is None:
+        return None
+    return trade.token_quantity * current_price - trade.entry_amount_sol
+
+
+def _pct_change(start: float, end: Optional[float]) -> Optional[float]:
+    if end is None or start <= 0:
+        return None
+    return ((end - start) / start) * 100
+
+
+def _pnl_label(value: Optional[float]) -> str:
+    if value is None:
+        return "unavailable"
+    return "{0:+.6f} SOL".format(value)
 
 
 def _html(value: Any) -> str:

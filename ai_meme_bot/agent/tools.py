@@ -8,7 +8,7 @@ from ai_meme_bot.config import AppConfig
 from ai_meme_bot.core.database import Database
 from ai_meme_bot.core.execution import TradeExecutor
 from ai_meme_bot.core.tracker import TokenTracker
-from ai_meme_bot.models import TokenSnapshot, TradeResult
+from ai_meme_bot.models import TokenEvaluation, TokenSnapshot, TradePlan, TradeResult
 
 
 class TradingTools:
@@ -38,7 +38,10 @@ class TradingTools:
         return snapshot.prompt_payload() if snapshot else None
 
     async def trigger_buy(
-        self, token_address: str, snapshot: Optional[TokenSnapshot] = None
+        self,
+        token_address: str,
+        snapshot: Optional[TokenSnapshot] = None,
+        evaluation: Optional[TokenEvaluation] = None,
     ) -> TradeResult:
         """Open a paper buy after the orchestrator has approved the token."""
 
@@ -46,9 +49,27 @@ class TradingTools:
         if chosen_snapshot is None:
             return TradeResult(False, "Token has no eligible PumpSwap snapshot.")
         settings = await self.database.get_strategy_settings(self.config.strategy_defaults)
+        plan = evaluation.trade_plan if evaluation else None
+        entry_amount = plan.entry_amount_sol if plan else settings.base_trade_amount
+        balance = await self.database.get_balance()
+        if balance <= 0:
+            return TradeResult(False, "Dummy balance is insufficient.")
+        entry_amount = min(entry_amount, balance)
+        if plan is not None and entry_amount != plan.entry_amount_sol:
+            plan = TradePlan(
+                entry_amount_sol=entry_amount,
+                stop_loss_pct=plan.stop_loss_pct,
+                take_profit_targets_pct=plan.take_profit_targets_pct[:],
+                trailing_stop_pct=plan.trailing_stop_pct,
+                max_hold_seconds=plan.max_hold_seconds,
+                rationale="{0} Size capped by available paper balance.".format(
+                    plan.rationale
+                ).strip(),
+            )
         return await self.executor.execute_trade(
             token_address,
             "BUY",
-            settings.base_trade_amount,
+            entry_amount,
             chosen_snapshot,
+            plan,
         )

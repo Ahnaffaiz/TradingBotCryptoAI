@@ -49,6 +49,43 @@ async def test_database_rejects_duplicate_and_insufficient_opens(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_ai_trade_plan_persists_and_controls_hard_exit(tmp_path):
+    config = make_config(tmp_path / "trades.db")
+    database = Database(config.db_path)
+    await database.init_db()
+    trade_id = await database.insert_trade(
+        "mint-1",
+        1.0,
+        0.5,
+        0.5,
+        make_snapshot(price=1.0).stored_payload(),
+        {
+            "entry_amount_sol": 0.5,
+            "stop_loss_pct": 12,
+            "take_profit_targets_pct": [30, 60],
+            "trailing_stop_pct": 5,
+            "max_hold_seconds": 3600,
+        },
+    )
+    trade = await database.get_trade(trade_id)
+    settings = StrategySettings(
+        25,
+        30.0,
+        0.1,
+        45.0,
+        "00:00",
+        take_profit_pct=10.0,
+        stop_loss_pct=5.0,
+    )
+
+    assert '"take_profit_targets_pct": [30, 60]' in trade.trade_plan_json
+    assert _hard_exit_reason(trade, make_snapshot(price=1.2), settings, 1.2) is None
+    assert "TP1 30" in _hard_exit_reason(
+        trade, make_snapshot(price=1.35), settings, 1.35
+    )
+
+
+@pytest.mark.asyncio
 async def test_real_mode_fails_closed(tmp_path):
     config = make_config(tmp_path / "trades.db", trading_mode="REAL")
     database = Database(config.db_path)

@@ -16,6 +16,7 @@ from ai_meme_bot.models import (
     StrategySettings,
     TokenEvaluation,
     TokenSnapshot,
+    TradePlan,
     TradeRecord,
 )
 
@@ -124,10 +125,15 @@ class TradingAIService:
         self.backend = backend
 
     async def evaluate_entry(
-        self, snapshot: TokenSnapshot, rules: str
+        self,
+        snapshot: TokenSnapshot,
+        rules: str,
+        settings: Optional[StrategySettings] = None,
     ) -> TokenEvaluation:
         """Return a validated entry review or a safe skip."""
 
+        active_settings = settings or StrategySettings(25, 30.0, 0.1, 45.0, "00:00")
+        max_entry_size = min(2.0, max(active_settings.base_trade_amount * 3.0, 0.01))
         prompt = {
             "task": "Evaluate whether a paper trader may buy this PumpSwap candidate.",
             "strategy": (
@@ -139,10 +145,33 @@ class TradingAIService:
             ),
             "candidate": snapshot.prompt_payload(),
             "latest_rules": rules or "No learned rules yet.",
+            "current_settings": active_settings.prompt_payload(),
+            "risk_plan_guardrails": {
+                "position_size_sol": "number 0.01..{0:g}; use smaller size for weak, illiquid, concentrated, or extended setups".format(
+                    max_entry_size
+                ),
+                "stop_loss_pct": "number 1..50",
+                "take_profit_targets_pct": (
+                    "array of 1 to 4 ascending numbers, each 3..500"
+                ),
+                "trailing_stop_pct": "number 0..50",
+                "max_hold_seconds": "number 60..86400",
+            },
             "response_schema": {
                 "score": "integer from 0 to 100",
                 "decision": "buy or skip",
                 "rationale": "short string",
+                "trade_plan": {
+                    "position_size_sol": "number",
+                    "stop_loss_pct": "number",
+                    "take_profit_targets_pct": [
+                        "take profit 1 pct",
+                        "take profit 2 pct",
+                    ],
+                    "trailing_stop_pct": "number",
+                    "max_hold_seconds": "number",
+                    "rationale": "short string explaining sizing and exits",
+                },
             },
         }
         try:
@@ -156,7 +185,17 @@ class TradingAIService:
             rationale = str(payload.get("rationale", "")).strip()
             if score < 0 or score > 100 or decision not in {"buy", "skip"}:
                 raise ValueError("entry response fields are invalid")
-            return TokenEvaluation(score=score, decision=decision, rationale=rationale)
+            trade_plan = None
+            if decision == "buy":
+                trade_plan = _validated_trade_plan(
+                    payload, active_settings, score, snapshot, rationale
+                )
+            return TokenEvaluation(
+                score=score,
+                decision=decision,
+                rationale=rationale,
+                trade_plan=trade_plan,
+            )
         except Exception as exc:
             LOGGER.warning("Entry AI response rejected: %s", exc)
             return TokenEvaluation()
@@ -384,6 +423,115 @@ def _validated_settings(payload: Any) -> Optional[StrategySettings]:
         scout_min_liquidity_usd,
         scout_min_volume_5m_usd,
     )
+
+
+def _validated_trade_plan(
+    payload: Dict[str, Any],
+    settings: StrategySettings,
+    score: int,
+    snapshot: TokenSnapshot,
+    fallback_rationale: str,
+) -> TradePlan:
+    """Build a bounded AI trade plan, with conservative defaults for old providers."""
+
+    raw_plan = payload.get("trade_plan")
+    plan = raw_plan if isinstance(raw_plan, dict) else payload
+    inferred = _inferred_trade_plan(settings, score, snapshot, fallback_rationale)
+    max_entry_size = min(2.0, max(settings.base_trade_amount * 3.0, 0.01))
+
+    amount = _bounded_float(
+        plan.get("position_size_sol", plan.get("entry_amount_sol")),
+        0.01,
+        max_entry_size,
+        inferred.entry_amount_sol,
+    )
+    stop_loss = _bounded_float(
+        plan.get("stop_loss_pct"),
+        1.0,
+        50.0,
+        inferred.stop_loss_pct,
+    )
+    trailing_stop = _bounded_float(
+        plan.get("trailing_stop_pct"),
+        0.0,
+        50.0,
+        inferred.trailing_stop_pct,
+    )
+    max_hold = _bounded_float(
+        plan.get("max_hold_seconds"),
+        60.0,
+        86400.0,
+        inferred.max_hold_seconds,
+    )
+    targets = _bounded_targets(
+        plan.get("take_profit_targets_pct"),
+        inferred.take_profit_targets_pct,
+    )
+    rationale = str(plan.get("rationale") or inferred.rationale).strip()
+    return TradePlan(
+        entry_amount_sol=amount,
+        stop_loss_pct=stop_loss,
+        take_profit_targets_pct=targets,
+        trailing_stop_pct=trailing_stop,
+        max_hold_seconds=max_hold,
+        rationale=rationale,
+    )
+
+
+def _inferred_trade_plan(
+    settings: StrategySettings,
+    score: int,
+    snapshot: TokenSnapshot,
+    fallback_rationale: str,
+) -> TradePlan:
+    confidence = max(0.25, min(1.0, score / 100.0))
+    liquidity_factor = 0.75 if snapshot.liquidity_usd < 20000 else 1.0
+    momentum_factor = 0.85 if (snapshot.price_change_5m_pct or 0) > 80 else 1.0
+    amount = (
+        settings.base_trade_amount
+        * (0.5 + confidence)
+        * liquidity_factor
+        * momentum_factor
+    )
+    amount = round(max(0.01, min(amount, settings.base_trade_amount * 2.0, 2.0)), 6)
+    first_target = max(3.0, settings.take_profit_pct * (0.85 + confidence * 0.5))
+    second_target = max(first_target + 1.0, first_target * 1.8)
+    stop_loss = max(
+        1.0, min(50.0, settings.stop_loss_pct * (1.15 - confidence * 0.35))
+    )
+    trailing_stop = max(0.0, min(50.0, settings.trailing_stop_pct))
+    return TradePlan(
+        entry_amount_sol=amount,
+        stop_loss_pct=round(stop_loss, 4),
+        take_profit_targets_pct=[round(first_target, 4), round(second_target, 4)],
+        trailing_stop_pct=round(trailing_stop, 4),
+        max_hold_seconds=settings.max_hold_seconds,
+        rationale=fallback_rationale or "Fallback risk plan from score and liquidity.",
+    )
+
+
+def _bounded_float(
+    value: Any, minimum: float, maximum: float, fallback: float
+) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = fallback
+    return round(max(minimum, min(maximum, parsed)), 6)
+
+
+def _bounded_targets(value: Any, fallback: List[float]) -> List[float]:
+    raw_targets = value if isinstance(value, list) else fallback
+    targets: List[float] = []
+    for item in raw_targets:
+        try:
+            parsed = float(item)
+        except (TypeError, ValueError):
+            continue
+        if 3.0 <= parsed <= 500.0:
+            targets.append(round(parsed, 6))
+    normalized = sorted(set(targets))[:4]
+    return normalized or fallback[:]
 
 
 def _valid_hhmm(value: str) -> bool:

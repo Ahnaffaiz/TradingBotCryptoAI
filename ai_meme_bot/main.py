@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from datetime import datetime, time as clock_time, timedelta, timezone
@@ -22,7 +23,7 @@ from ai_meme_bot.config import AppConfig
 from ai_meme_bot.core.database import Database
 from ai_meme_bot.core.execution import TradeExecutor
 from ai_meme_bot.core.tracker import TokenTracker
-from ai_meme_bot.models import ExitDecision
+from ai_meme_bot.models import ExitDecision, TradePlan
 
 
 LOGGER = logging.getLogger(__name__)
@@ -44,7 +45,8 @@ async def run_discovery_loop(
             continue
         try:
             rules = await database.get_latest_rules()
-            evaluation = await ai_service.evaluate_entry(snapshot, rules)
+            settings = await database.get_strategy_settings(config.strategy_defaults)
+            evaluation = await _evaluate_entry(ai_service, snapshot, rules, settings)
             analysis_id = await database.record_analysis(snapshot, evaluation)
             await database.add_activity(
                 "analysis",
@@ -60,13 +62,12 @@ async def run_discovery_loop(
                 },
             )
             await notifier.entry_analysis(snapshot, evaluation)
-            settings = await database.get_strategy_settings(config.strategy_defaults)
             threshold = _entry_threshold(settings, snapshot.strategy)
             if (
                 evaluation.score > 0
                 and evaluation.score >= threshold
             ):
-                result = await tools.trigger_buy(snapshot.token_address, snapshot)
+                result = await _trigger_buy(tools, snapshot, evaluation)
                 if result.success:
                     await database.mark_analysis_bought(analysis_id, result.trade_id)
                 await database.add_activity(
@@ -204,32 +205,103 @@ def _entry_threshold(settings: Any, strategy: str) -> int:
     return settings.entry_score_threshold
 
 
+async def _evaluate_entry(
+    ai_service: Any, snapshot: Any, rules: str, settings: Any
+) -> Any:
+    signature = inspect.signature(ai_service.evaluate_entry)
+    if len(signature.parameters) >= 3:
+        return await ai_service.evaluate_entry(snapshot, rules, settings)
+    return await ai_service.evaluate_entry(snapshot, rules)
+
+
+async def _trigger_buy(tools: Any, snapshot: Any, evaluation: Any) -> Any:
+    signature = inspect.signature(tools.trigger_buy)
+    if len(signature.parameters) >= 3:
+        return await tools.trigger_buy(snapshot.token_address, snapshot, evaluation)
+    return await tools.trigger_buy(snapshot.token_address, snapshot)
+
+
 def _hard_exit_reason(
     trade: Any, snapshot: Any, settings: Any, high_price: float
 ) -> str | None:
+    plan = _trade_plan_for_hard_exit(trade, settings)
     change_pct = _pct_change(trade.buy_price, snapshot.price_usd)
     if change_pct is None:
         return None
-    if change_pct >= settings.take_profit_pct:
-        return "take profit {0:.2f}% >= {1:g}%".format(
-            change_pct, settings.take_profit_pct
+    take_profit_pct = (
+        plan.take_profit_targets_pct[0]
+        if plan.take_profit_targets_pct
+        else settings.take_profit_pct
+    )
+    if change_pct >= take_profit_pct:
+        return "take profit {0:.2f}% >= TP1 {1:g}%".format(
+            change_pct, take_profit_pct
         )
-    if change_pct <= -settings.stop_loss_pct:
+    if change_pct <= -plan.stop_loss_pct:
         return "stop loss {0:.2f}% <= -{1:g}%".format(
-            change_pct, settings.stop_loss_pct
+            change_pct, plan.stop_loss_pct
         )
-    if settings.trailing_stop_pct > 0 and high_price > trade.buy_price:
+    if plan.trailing_stop_pct > 0 and high_price > trade.buy_price:
         trail_pct = _pct_change(high_price, snapshot.price_usd)
-        if trail_pct is not None and trail_pct <= -settings.trailing_stop_pct:
+        if trail_pct is not None and trail_pct <= -plan.trailing_stop_pct:
             return "trailing stop {0:.2f}% from high <= -{1:g}%".format(
-                trail_pct, settings.trailing_stop_pct
+                trail_pct, plan.trailing_stop_pct
             )
     opened_at = _parse_iso_datetime(trade.opened_at)
     if opened_at is not None:
         age_seconds = (datetime.now(timezone.utc) - opened_at).total_seconds()
-        if age_seconds >= settings.max_hold_seconds:
-            return "max hold {0:g}s reached".format(settings.max_hold_seconds)
+        if age_seconds >= plan.max_hold_seconds:
+            return "max hold {0:g}s reached".format(plan.max_hold_seconds)
     return None
+
+
+def _trade_plan_for_hard_exit(trade: Any, settings: Any) -> TradePlan:
+    fallback = TradePlan(
+        entry_amount_sol=float(
+            getattr(trade, "entry_amount_sol", settings.base_trade_amount)
+        ),
+        stop_loss_pct=float(settings.stop_loss_pct),
+        take_profit_targets_pct=[float(settings.take_profit_pct)],
+        trailing_stop_pct=float(settings.trailing_stop_pct),
+        max_hold_seconds=float(settings.max_hold_seconds),
+    )
+    raw_json = getattr(trade, "trade_plan_json", "") or ""
+    try:
+        payload = json.loads(raw_json)
+    except (TypeError, ValueError):
+        return fallback
+    if not isinstance(payload, dict):
+        return fallback
+    try:
+        targets = (
+            payload.get("take_profit_targets_pct")
+            or fallback.take_profit_targets_pct
+        )
+        if not isinstance(targets, list):
+            targets = fallback.take_profit_targets_pct
+        normalized_targets = []
+        for target in targets:
+            parsed = float(target)
+            if parsed > 0:
+                normalized_targets.append(parsed)
+        return TradePlan(
+            entry_amount_sol=float(
+                payload.get("entry_amount_sol", fallback.entry_amount_sol)
+            ),
+            stop_loss_pct=float(payload.get("stop_loss_pct", fallback.stop_loss_pct)),
+            take_profit_targets_pct=(
+                normalized_targets or fallback.take_profit_targets_pct
+            ),
+            trailing_stop_pct=float(
+                payload.get("trailing_stop_pct", fallback.trailing_stop_pct)
+            ),
+            max_hold_seconds=float(
+                payload.get("max_hold_seconds", fallback.max_hold_seconds)
+            ),
+            rationale=str(payload.get("rationale", "")),
+        )
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _pct_change(start: float, end: float) -> float | None:
@@ -393,7 +465,9 @@ async def run(config: AppConfig) -> None:
         strategy_settings_callback=strategy_settings,
     ) as tracker:
         tools = TradingTools(config, database, tracker, executor)
-        telegram = TelegramTradingBot(config, database)
+        telegram = TelegramTradingBot(
+            config, database, tracker=tracker, executor=executor
+        )
         application = (
             telegram.build_application() if config.telegram_bot_token else None
         )

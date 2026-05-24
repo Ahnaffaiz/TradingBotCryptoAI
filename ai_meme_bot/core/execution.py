@@ -12,7 +12,7 @@ from ai_meme_bot.core.database import (
     DuplicateOpenTradeError,
     InsufficientBalanceError,
 )
-from ai_meme_bot.models import TokenSnapshot, TradeRecord, TradeResult
+from ai_meme_bot.models import TokenSnapshot, TradePlan, TradeRecord, TradeResult
 
 
 LOGGER = logging.getLogger(__name__)
@@ -35,6 +35,7 @@ class TradeExecutor:
         action: str,
         amount_sol: Optional[float],
         snapshot: TokenSnapshot,
+        trade_plan: Optional[TradePlan] = None,
     ) -> TradeResult:
         """Dispatch a trade action based on `TRADING_MODE`."""
 
@@ -43,7 +44,10 @@ class TradeExecutor:
             if self.config.trading_mode == "PAPER":
                 if action == "BUY":
                     return await self._paper_buy(
-                        token_address, amount_sol or self.config.base_trade_amount, snapshot
+                        token_address,
+                        amount_sol or self.config.base_trade_amount,
+                        snapshot,
+                        trade_plan,
                     )
                 if action in {"SELL", "CLOSE"}:
                     return await self._paper_close_by_token(token_address, snapshot, "AI close")
@@ -84,7 +88,11 @@ class TradeExecutor:
         return TradeResult(True, "Closed paper trade.", trade_id=trade.id, pnl=pnl)
 
     async def _paper_buy(
-        self, token_address: str, amount_sol: float, snapshot: TokenSnapshot
+        self,
+        token_address: str,
+        amount_sol: float,
+        snapshot: TokenSnapshot,
+        trade_plan: Optional[TradePlan] = None,
     ) -> TradeResult:
         if snapshot.price_usd <= 0:
             raise ValueError("Paper buy needs a positive snapshot price.")
@@ -98,6 +106,7 @@ class TradeExecutor:
                 entry_amount_sol=amount_sol,
                 token_quantity=token_quantity,
                 entry_snapshot=snapshot.stored_payload(),
+                trade_plan=trade_plan.stored_payload() if trade_plan else None,
             )
         except (InsufficientBalanceError, DuplicateOpenTradeError):
             raise
@@ -125,8 +134,10 @@ async def execute_trade(
     action: str,
     amount_sol: Optional[float],
     snapshot: TokenSnapshot,
+    trade_plan: Optional[TradePlan] = None,
 ) -> TradeResult:
     """PRD-style function wrapper around the mode-aware executor."""
 
-    return await executor.execute_trade(token_address, action, amount_sol, snapshot)
-
+    return await executor.execute_trade(
+        token_address, action, amount_sol, snapshot, trade_plan
+    )

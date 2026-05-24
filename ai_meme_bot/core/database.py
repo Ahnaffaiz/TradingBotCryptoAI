@@ -72,6 +72,7 @@ class Database:
                     entry_amount_sol REAL NOT NULL,
                     token_quantity REAL NOT NULL,
                     entry_snapshot_json TEXT NOT NULL,
+                    trade_plan_json TEXT NOT NULL DEFAULT '{}',
                     exit_snapshot_json TEXT,
                     exit_reason TEXT,
                     opened_at TEXT NOT NULL,
@@ -137,6 +138,12 @@ class Database:
                 );
                 """
             )
+            await _ensure_column(
+                connection,
+                "trade_history",
+                "trade_plan_json",
+                "TEXT NOT NULL DEFAULT '{}'",
+            )
             await connection.execute(
                 "INSERT OR IGNORE INTO wallet(id, balance) VALUES(1, ?)",
                 (DEFAULT_BALANCE,),
@@ -188,6 +195,7 @@ class Database:
         entry_amount_sol: float,
         token_quantity: float,
         entry_snapshot: Dict[str, Any],
+        trade_plan: Optional[Dict[str, Any]] = None,
     ) -> int:
         """Debit the wallet and create one open paper trade atomically."""
 
@@ -213,8 +221,9 @@ class Database:
                     """
                     INSERT INTO trade_history(
                         token_address, buy_price, status, timestamp,
-                        entry_amount_sol, token_quantity, entry_snapshot_json, opened_at
-                    ) VALUES(?, ?, 'OPEN', ?, ?, ?, ?, ?)
+                        entry_amount_sol, token_quantity, entry_snapshot_json,
+                        trade_plan_json, opened_at
+                    ) VALUES(?, ?, 'OPEN', ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         token_address,
@@ -223,6 +232,7 @@ class Database:
                         entry_amount_sol,
                         token_quantity,
                         json.dumps(entry_snapshot, sort_keys=True),
+                        json.dumps(trade_plan or {}, sort_keys=True),
                         opened_at,
                     ),
                 )
@@ -341,6 +351,18 @@ class Database:
         return await self._fetch_trades(
             "SELECT * FROM trade_history ORDER BY opened_at DESC LIMIT ?", (limit,)
         )
+
+    async def get_trade_history(
+        self, limit: Optional[int] = None
+    ) -> List[TradeRecord]:
+        """Fetch trade history regardless of status, newest first."""
+
+        sql = "SELECT * FROM trade_history ORDER BY opened_at DESC"
+        params: Iterable[Any] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (limit,)
+        return await self._fetch_trades(sql, params)
 
     async def _fetch_trades(
         self, sql: str, params: Iterable[Any] = ()
@@ -737,6 +759,17 @@ async def _fetch_dicts(
     return [dict(row) for row in await cursor.fetchall()]
 
 
+async def _ensure_column(
+    connection: aiosqlite.Connection, table: str, column: str, definition: str
+) -> None:
+    cursor = await connection.execute("PRAGMA table_info({0})".format(table))
+    columns = {str(row["name"]) for row in await cursor.fetchall()}
+    if column not in columns:
+        await connection.execute(
+            "ALTER TABLE {0} ADD COLUMN {1} {2}".format(table, column, definition)
+        )
+
+
 async def _activity_evidence(
     connection: aiosqlite.Connection, event_type: str, limit: int
 ) -> List[Dict[str, Any]]:
@@ -764,6 +797,7 @@ def _trade_evidence(trade: TradeRecord) -> Dict[str, Any]:
         "opened_at": trade.opened_at,
         "closed_at": trade.closed_at,
         "entry_snapshot_json": trade.entry_snapshot_json,
+        "trade_plan_json": trade.trade_plan_json,
         "exit_snapshot_json": trade.exit_snapshot_json,
     }
 
@@ -825,11 +859,17 @@ async def insert_trade(
     entry_amount_sol: float,
     token_quantity: float,
     entry_snapshot: Dict[str, Any],
+    trade_plan: Optional[Dict[str, Any]] = None,
 ) -> int:
     """PRD-style wrapper for opening a paper trade."""
 
     return await Database(db_path).insert_trade(
-        token_address, buy_price, entry_amount_sol, token_quantity, entry_snapshot
+        token_address,
+        buy_price,
+        entry_amount_sol,
+        token_quantity,
+        entry_snapshot,
+        trade_plan,
     )
 
 

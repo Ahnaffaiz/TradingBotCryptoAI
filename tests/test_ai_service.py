@@ -25,6 +25,7 @@ def make_trade(status="OPEN"):
         entry_amount_sol=1.0,
         token_quantity=0.5,
         entry_snapshot_json="{}",
+        trade_plan_json="{}",
         exit_snapshot_json=None,
         exit_reason=None,
         opened_at="2026-05-22T00:00:00+00:00",
@@ -50,6 +51,34 @@ async def test_entry_accepts_valid_json_and_rejects_bad_json():
     assert approved.wants_buy is True
     assert rejected.wants_buy is False
     assert rejected.score == 0
+
+
+@pytest.mark.asyncio
+async def test_entry_accepts_bounded_ai_trade_plan():
+    service = TradingAIService(
+        FakeBackend(
+            [
+                (
+                    '{"score": 88, "decision": "buy", "rationale": "strong setup", '
+                    '"trade_plan": {"position_size_sol": 5, "stop_loss_pct": 0.5, '
+                    '"take_profit_targets_pct": [12, 24, 600], '
+                    '"trailing_stop_pct": 7, "max_hold_seconds": 120, '
+                    '"rationale": "high liquidity"}}'
+                )
+            ]
+        )
+    )
+
+    evaluation = await service.evaluate_entry(
+        make_snapshot(),
+        "",
+        StrategySettings(25, 30.0, 0.5, 45.0, "00:00"),
+    )
+
+    assert evaluation.trade_plan.entry_amount_sol == 1.5
+    assert evaluation.trade_plan.stop_loss_pct == 1.0
+    assert evaluation.trade_plan.take_profit_targets_pct == [12.0, 24.0]
+    assert evaluation.trade_plan.trailing_stop_pct == 7.0
 
 
 @pytest.mark.asyncio

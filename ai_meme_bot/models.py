@@ -77,12 +77,28 @@ class TokenSnapshot:
 
 
 @dataclass
+class TradePlan:
+    """AI-generated paper position sizing and exit setup."""
+
+    entry_amount_sol: float
+    stop_loss_pct: float
+    take_profit_targets_pct: List[float] = field(default_factory=list)
+    trailing_stop_pct: float = 0.0
+    max_hold_seconds: float = 3600.0
+    rationale: str = ""
+
+    def stored_payload(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class TokenEvaluation:
     """AI entry review result."""
 
     score: int = 0
     decision: str = "skip"
     rationale: str = "AI evaluation unavailable."
+    trade_plan: Optional[TradePlan] = None
 
     @property
     def wants_buy(self) -> bool:
@@ -197,6 +213,7 @@ class TradeRecord:
     entry_amount_sol: float
     token_quantity: float
     entry_snapshot_json: str
+    trade_plan_json: str
     exit_snapshot_json: Optional[str]
     exit_reason: Optional[str]
     opened_at: str
