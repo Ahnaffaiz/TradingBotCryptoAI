@@ -21,5 +21,6 @@ ai_meme_bot/core/tracker.py
 tests/test_ai_service.py
 tests/test_config.py
 tests/test_database_execution.py
+tests/test_notifications.py
 tests/test_telegram.py
 tests/test_tracker.py
