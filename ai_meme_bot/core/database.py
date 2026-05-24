@@ -21,7 +21,7 @@ from ai_meme_bot.models import (
 )
 
 
-DEFAULT_BALANCE = 100.0
+DEFAULT_BALANCE = 1.0
 
 
 class DatabaseError(RuntimeError):

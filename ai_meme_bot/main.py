@@ -22,6 +22,7 @@ from ai_meme_bot.config import AppConfig
 from ai_meme_bot.core.database import Database
 from ai_meme_bot.core.execution import TradeExecutor
 from ai_meme_bot.core.tracker import TokenTracker
+from ai_meme_bot.models import ExitDecision
 
 
 LOGGER = logging.getLogger(__name__)

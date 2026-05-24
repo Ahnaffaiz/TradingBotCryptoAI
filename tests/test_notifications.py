@@ -1,8 +1,11 @@
+import asyncio
+
 import pytest
 
 from ai_meme_bot.core.database import Database
-from ai_meme_bot.main import run_discovery_loop
-from ai_meme_bot.models import TokenEvaluation, TradeResult
+from ai_meme_bot.core.execution import TradeExecutor
+from ai_meme_bot.main import run_discovery_loop, run_position_review_loop
+from ai_meme_bot.models import ExitDecision, TokenEvaluation, TradeResult
 from tests.helpers import make_config, make_snapshot
 
 
@@ -16,6 +19,11 @@ class OneScoutSnapshotTracker:
         snapshot = make_snapshot()
         snapshot.strategy = "scout"
         yield snapshot
+
+
+class TakeProfitTracker:
+    async def snapshot_for_token(self, token_address, apply_filters=True):
+        return make_snapshot(price=1.2, token=token_address)
 
 
 class BuyAI:
@@ -36,6 +44,11 @@ class ThresholdSkipAI:
 class UnavailableAI:
     async def evaluate_entry(self, _snapshot, _rules):
         return TokenEvaluation()
+
+
+class HoldAI:
+    async def evaluate_exit(self, _trade, _snapshot, _rules):
+        return ExitDecision("hold", "wait")
 
 
 class BuyTools:
@@ -175,3 +188,33 @@ async def test_scout_mode_uses_separate_higher_threshold(tmp_path):
     )
 
     assert notifier.events == [("analysis", "mint-1", 35)]
+
+
+@pytest.mark.asyncio
+async def test_position_review_hard_exit_uses_exit_decision(tmp_path):
+    config = make_config(
+        tmp_path / "trades.db",
+        take_profit_pct=10.0,
+        position_review_seconds=999.0,
+    )
+    database = Database(config.db_path)
+    await database.init_db()
+    await database.insert_trade(
+        "mint-1", 1.0, 0.5, 0.5, make_snapshot(price=1.0).stored_payload()
+    )
+    notifier = CaptureNotifier()
+
+    task = run_position_review_loop(
+        database,
+        TakeProfitTracker(),
+        HoldAI(),
+        TradeExecutor(config, database),
+        config,
+        notifier,
+    )
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(task, timeout=0.05)
+
+    closed = await database.get_closed_trades()
+    assert len(closed) == 1
+    assert closed[0].exit_reason.startswith("take profit")

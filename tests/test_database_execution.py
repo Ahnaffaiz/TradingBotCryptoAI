@@ -22,14 +22,14 @@ async def test_paper_trade_lifecycle_updates_balance_and_pnl(tmp_path):
     trade = await database.get_trade(opened.trade_id)
 
     assert opened.success is True
-    assert await database.get_balance() == pytest.approx(99.0)
+    assert await database.get_balance() == pytest.approx(0.0)
     assert trade.token_quantity == pytest.approx(0.5)
 
     closed = await executor.close_trade(trade, make_snapshot(price=4.0), "take gains")
 
     assert closed.success is True
     assert closed.pnl == pytest.approx(1.0)
-    assert await database.get_balance() == pytest.approx(101.0)
+    assert await database.get_balance() == pytest.approx(2.0)
     assert (await database.get_trade(trade.id)).status == "CLOSED"
 
 
@@ -39,13 +39,13 @@ async def test_database_rejects_duplicate_and_insufficient_opens(tmp_path):
     database = Database(config.db_path)
     await database.init_db()
     snapshot = make_snapshot()
-    await database.insert_trade("mint-1", 2.0, 1.0, 0.5, snapshot.stored_payload())
+    await database.insert_trade("mint-1", 2.0, 0.5, 0.25, snapshot.stored_payload())
 
     with pytest.raises(DuplicateOpenTradeError):
-        await database.insert_trade("mint-1", 2.0, 1.0, 0.5, snapshot.stored_payload())
+        await database.insert_trade("mint-1", 2.0, 0.5, 0.25, snapshot.stored_payload())
 
     with pytest.raises(InsufficientBalanceError):
-        await database.insert_trade("mint-2", 2.0, 200.0, 100.0, snapshot.stored_payload())
+        await database.insert_trade("mint-2", 2.0, 2.0, 1.0, snapshot.stored_payload())
 
 
 @pytest.mark.asyncio

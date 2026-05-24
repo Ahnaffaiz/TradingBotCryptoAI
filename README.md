@@ -98,6 +98,7 @@ See [`ai_meme_bot/.env.example`](ai_meme_bot/.env.example). Important defaults:
 
 - `TRADING_MODE=PAPER`
 - `BASE_TRADE_AMOUNT=0.1`
+- Paper wallet starts with `1.0` SOL in a fresh SQLite database.
 - `MIN_LIQUIDITY_USD=10000`
 - `MIN_PAIR_AGE_SECONDS=60`
 - `ENTRY_SCORE_THRESHOLD=25`
