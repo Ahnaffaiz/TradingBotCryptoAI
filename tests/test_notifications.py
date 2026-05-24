@@ -21,6 +21,16 @@ class ThresholdBuyAI:
         return TokenEvaluation(score=25, decision="buy", rationale="paper entry")
 
 
+class ThresholdSkipAI:
+    async def evaluate_entry(self, _snapshot, _rules):
+        return TokenEvaluation(score=35, decision="skip", rationale="score gate")
+
+
+class UnavailableAI:
+    async def evaluate_entry(self, _snapshot, _rules):
+        return TokenEvaluation()
+
+
 class BuyTools:
     async def trigger_buy(self, _token_address, _snapshot):
         return TradeResult(True, "Opened paper trade.")
@@ -93,3 +103,46 @@ async def test_discovery_buys_when_score_meets_threshold(tmp_path):
         ("analysis", "mint-1", 25),
         ("buy", "mint-1", 25, None),
     ]
+
+
+@pytest.mark.asyncio
+async def test_discovery_score_threshold_overrides_skip_decision(tmp_path):
+    config = make_config(tmp_path / "trades.db", entry_score_threshold=20)
+    database = Database(config.db_path)
+    await database.init_db()
+    await database.set_auto_trading(True)
+    notifier = CaptureNotifier()
+
+    await run_discovery_loop(
+        database,
+        OneSnapshotTracker(),
+        ThresholdSkipAI(),
+        BuyTools(),
+        config,
+        notifier,
+    )
+
+    assert notifier.events == [
+        ("analysis", "mint-1", 35),
+        ("buy", "mint-1", 35, None),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_discovery_does_not_buy_unavailable_zero_score(tmp_path):
+    config = make_config(tmp_path / "trades.db", entry_score_threshold=0)
+    database = Database(config.db_path)
+    await database.init_db()
+    await database.set_auto_trading(True)
+    notifier = CaptureNotifier()
+
+    await run_discovery_loop(
+        database,
+        OneSnapshotTracker(),
+        UnavailableAI(),
+        BuyTools(),
+        config,
+        notifier,
+    )
+
+    assert notifier.events == [("analysis", "mint-1", 0)]

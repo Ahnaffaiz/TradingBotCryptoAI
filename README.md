@@ -57,7 +57,7 @@ Telegram commands:
 - `/menu` reopens the button menu.
 - `/whoami` shows the Telegram user ID for admin-only features.
 - `/status` shows mode, configured AI model, paper balance, and trades.
-- `/auto_on` allows new AI-approved paper entries.
+- `/auto_on` allows new paper entries whose AI score meets the live threshold.
 - `/auto_off` stops new entries while open trades remain under review.
 - `/threshold <0-100>` changes the live buy score threshold, for example `/threshold 25`.
 - `/notify_on` enables Telegram reports.
@@ -135,7 +135,8 @@ activity. The AI writes three strict rules back into the active prompt and may t
 paper-mode runtime settings within app limits: entry score threshold, discovery poll
 cadence, paper trade size, exit review cadence, and next reflection wall-clock time.
 The entry score threshold starts at 25/100 and can be changed without restarting
-from Telegram. Invalid or out-of-range tuning output is ignored.
+from Telegram. A positive AI score at or above this threshold can open a paper buy,
+even if the model's label is `skip`. Invalid or out-of-range tuning output is ignored.
 
 ## Tests
 

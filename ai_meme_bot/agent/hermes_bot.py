@@ -315,7 +315,7 @@ class TelegramTradingBot:
         await _reply(
             update,
             "✅ <b>Entry threshold updated</b>\n"
-            "The bot may now buy when AI decision is BUY and score ≥ {0}/100.".format(
+            "The bot may now buy when the AI score is positive and ≥ {0}/100.".format(
                 threshold
             ),
             reply_markup=menu_markup(),
