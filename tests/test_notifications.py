@@ -11,6 +11,13 @@ class OneSnapshotTracker:
         yield make_snapshot()
 
 
+class OneScoutSnapshotTracker:
+    async def discover(self):
+        snapshot = make_snapshot()
+        snapshot.strategy = "scout"
+        yield snapshot
+
+
 class BuyAI:
     async def evaluate_entry(self, _snapshot, _rules):
         return TokenEvaluation(score=95, decision="buy", rationale="paper entry")
@@ -107,7 +114,9 @@ async def test_discovery_buys_when_score_meets_threshold(tmp_path):
 
 @pytest.mark.asyncio
 async def test_discovery_score_threshold_overrides_skip_decision(tmp_path):
-    config = make_config(tmp_path / "trades.db", entry_score_threshold=20)
+    config = make_config(
+        tmp_path / "trades.db", entry_score_threshold=20, launch_score_threshold=20
+    )
     database = Database(config.db_path)
     await database.init_db()
     await database.set_auto_trading(True)
@@ -146,3 +155,23 @@ async def test_discovery_does_not_buy_unavailable_zero_score(tmp_path):
     )
 
     assert notifier.events == [("analysis", "mint-1", 0)]
+
+
+@pytest.mark.asyncio
+async def test_scout_mode_uses_separate_higher_threshold(tmp_path):
+    config = make_config(tmp_path / "trades.db", scout_score_threshold=70)
+    database = Database(config.db_path)
+    await database.init_db()
+    await database.set_auto_trading(True)
+    notifier = CaptureNotifier()
+
+    await run_discovery_loop(
+        database,
+        OneScoutSnapshotTracker(),
+        ThresholdSkipAI(),
+        BuyTools(),
+        config,
+        notifier,
+    )
+
+    assert notifier.events == [("analysis", "mint-1", 35)]

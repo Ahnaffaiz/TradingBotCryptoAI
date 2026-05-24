@@ -42,6 +42,7 @@ class TokenSnapshot:
     x_sentiment_hint: Optional[str] = None
     geckoterminal_trending: Optional[bool] = None
     geckoterminal_trending_rank: Optional[int] = None
+    strategy: str = "launch"
     raw_context: Dict[str, Any] = field(default_factory=dict)
 
     def prompt_payload(self) -> Dict[str, Any]:
@@ -66,6 +67,7 @@ class TokenSnapshot:
             "x_sentiment_hint": self.x_sentiment_hint,
             "geckoterminal_trending": self.geckoterminal_trending,
             "geckoterminal_trending_rank": self.geckoterminal_trending_rank,
+            "strategy": self.strategy,
         }
 
     def stored_payload(self) -> Dict[str, Any]:
@@ -119,6 +121,16 @@ class StrategySettings:
     base_trade_amount: float
     position_review_seconds: float
     reflection_time: str
+    launch_enabled: bool = True
+    scout_enabled: bool = True
+    launch_score_threshold: int = 25
+    scout_score_threshold: int = 70
+    take_profit_pct: float = 18.0
+    stop_loss_pct: float = 8.0
+    trailing_stop_pct: float = 7.0
+    max_hold_seconds: float = 3600.0
+    scout_min_liquidity_usd: float = 15000.0
+    scout_min_volume_5m_usd: float = 500.0
 
     def prompt_payload(self) -> Dict[str, Any]:
         return asdict(self)

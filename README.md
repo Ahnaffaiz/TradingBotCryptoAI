@@ -57,9 +57,18 @@ Telegram commands:
 - `/menu` reopens the button menu.
 - `/whoami` shows the Telegram user ID for admin-only features.
 - `/status` shows mode, configured AI model, paper balance, and trades.
-- `/auto_on` allows new paper entries whose AI score meets the live threshold.
+- `/settings` shows launch/scout thresholds and hard-exit settings.
+- `/auto_on` allows new paper entries whose AI score meets the active strategy threshold.
 - `/auto_off` stops new entries while open trades remain under review.
-- `/threshold <0-100>` changes the live buy score threshold, for example `/threshold 25`.
+- `/launch_on` and `/launch_off` enable or disable fresh-graduate scanning.
+- `/scout_on` and `/scout_off` enable or disable existing/trending-coin scanning.
+- `/threshold <0-100>` changes the launch buy score threshold, for example `/threshold 25`.
+- `/launch_threshold <0-100>` changes the launch-mode buy threshold.
+- `/scout_threshold <0-100>` changes the scout-mode buy threshold.
+- `/take_profit <pct>` sets the hard take-profit exit.
+- `/stop_loss <pct>` sets the hard stop-loss exit.
+- `/trailing_stop <pct>` sets the hard trailing-stop exit; `0` disables it.
+- `/max_hold <30m|1h|1d>` sets the maximum hold time.
 - `/notify_on` enables Telegram reports.
 - `/notify_off` mutes Telegram reports.
 - `/hermes <task>` runs the opt-in admin workspace operator.
@@ -92,6 +101,24 @@ See [`ai_meme_bot/.env.example`](ai_meme_bot/.env.example). Important defaults:
 - `MIN_LIQUIDITY_USD=10000`
 - `MIN_PAIR_AGE_SECONDS=60`
 - `ENTRY_SCORE_THRESHOLD=25`
+- `LAUNCH_ENABLED=1`
+- `SCOUT_ENABLED=1`
+- `LAUNCH_SCORE_THRESHOLD=25`
+- `SCOUT_SCORE_THRESHOLD=70`
+- `TAKE_PROFIT_PCT=18`
+- `STOP_LOSS_PCT=8`
+- `TRAILING_STOP_PCT=7`
+- `MAX_HOLD_SECONDS=3600`
+- `SCOUT_MIN_LIQUIDITY_USD=15000`
+- `SCOUT_MIN_VOLUME_5M_USD=500`
+
+The bot has two entry lanes:
+
+- Launch mode watches the latest Dexscreener Solana token profiles for fresh
+  PumpSwap graduates and uses the lower launch threshold.
+- Scout mode scans GeckoTerminal's Solana trending pools for already-active
+  PumpSwap tokens, applies stricter liquidity/volume/sell-pressure filters, and
+  uses the higher scout threshold.
 
 Paper trading does not require a Pump.fun RPC, wallet key, or Jito setup. Dexscreener
 provides discovery and pair pricing. `HELIUS_RPC_URL` or `SOLANA_RPC_URL` is optional
@@ -134,9 +161,11 @@ correct skips, missed winners, tokens rejected by base filters, and recurring er
 activity. The AI writes three strict rules back into the active prompt and may tune
 paper-mode runtime settings within app limits: entry score threshold, discovery poll
 cadence, paper trade size, exit review cadence, and next reflection wall-clock time.
-The entry score threshold starts at 25/100 and can be changed without restarting
-from Telegram. A positive AI score at or above this threshold can open a paper buy,
-even if the model's label is `skip`. Invalid or out-of-range tuning output is ignored.
+The launch threshold starts at 25/100 and scout threshold starts at 70/100. Both can
+be changed without restarting from Telegram. A positive AI score at or above the
+active strategy threshold can open a paper buy, even if the model's label is `skip`.
+Hard exits can close positions before AI exit analysis when take-profit, stop-loss,
+trailing-stop, or max-hold rules trigger. Invalid or out-of-range tuning output is ignored.
 
 ## Tests
 

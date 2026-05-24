@@ -82,6 +82,16 @@ class AppConfig:
     min_liquidity_usd: float
     min_pair_age_seconds: int
     entry_score_threshold: int
+    launch_enabled: bool
+    scout_enabled: bool
+    launch_score_threshold: int
+    scout_score_threshold: int
+    take_profit_pct: float
+    stop_loss_pct: float
+    trailing_stop_pct: float
+    max_hold_seconds: float
+    scout_min_liquidity_usd: float
+    scout_min_volume_5m_usd: float
     reflection_time: str
     reflection_timezone: str
 
@@ -132,6 +142,25 @@ class AppConfig:
         entry_threshold = _int_env("ENTRY_SCORE_THRESHOLD", 25)
         if entry_threshold < 0 or entry_threshold > 100:
             raise ConfigError("ENTRY_SCORE_THRESHOLD must be between 0 and 100.")
+        launch_threshold = _int_env("LAUNCH_SCORE_THRESHOLD", entry_threshold)
+        scout_threshold = _int_env("SCOUT_SCORE_THRESHOLD", 70)
+        if not 0 <= launch_threshold <= 100:
+            raise ConfigError("LAUNCH_SCORE_THRESHOLD must be between 0 and 100.")
+        if not 0 <= scout_threshold <= 100:
+            raise ConfigError("SCOUT_SCORE_THRESHOLD must be between 0 and 100.")
+
+        take_profit_pct = _float_env("TAKE_PROFIT_PCT", 18.0)
+        stop_loss_pct = _float_env("STOP_LOSS_PCT", 8.0)
+        trailing_stop_pct = _float_env("TRAILING_STOP_PCT", 7.0)
+        max_hold_seconds = _float_env("MAX_HOLD_SECONDS", 3600.0)
+        if take_profit_pct <= 0:
+            raise ConfigError("TAKE_PROFIT_PCT must be greater than zero.")
+        if stop_loss_pct <= 0:
+            raise ConfigError("STOP_LOSS_PCT must be greater than zero.")
+        if trailing_stop_pct < 0:
+            raise ConfigError("TRAILING_STOP_PCT must be zero or greater.")
+        if max_hold_seconds <= 0:
+            raise ConfigError("MAX_HOLD_SECONDS must be greater than zero.")
 
         return cls(
             trading_mode=trading_mode,
@@ -167,6 +196,16 @@ class AppConfig:
             min_liquidity_usd=_float_env("MIN_LIQUIDITY_USD", 10000.0),
             min_pair_age_seconds=_int_env("MIN_PAIR_AGE_SECONDS", 60),
             entry_score_threshold=entry_threshold,
+            launch_enabled=_bool_env("LAUNCH_ENABLED", True),
+            scout_enabled=_bool_env("SCOUT_ENABLED", True),
+            launch_score_threshold=launch_threshold,
+            scout_score_threshold=scout_threshold,
+            take_profit_pct=take_profit_pct,
+            stop_loss_pct=stop_loss_pct,
+            trailing_stop_pct=trailing_stop_pct,
+            max_hold_seconds=max_hold_seconds,
+            scout_min_liquidity_usd=_float_env("SCOUT_MIN_LIQUIDITY_USD", 15000.0),
+            scout_min_volume_5m_usd=_float_env("SCOUT_MIN_VOLUME_5M_USD", 500.0),
             reflection_time=os.getenv("REFLECTION_TIME", "00:00").strip(),
             reflection_timezone=os.getenv("REFLECTION_TIMEZONE", "Asia/Jakarta").strip(),
         )
@@ -187,4 +226,14 @@ class AppConfig:
             base_trade_amount=self.base_trade_amount,
             position_review_seconds=self.position_review_seconds,
             reflection_time=self.reflection_time,
+            launch_enabled=self.launch_enabled,
+            scout_enabled=self.scout_enabled,
+            launch_score_threshold=self.launch_score_threshold,
+            scout_score_threshold=self.scout_score_threshold,
+            take_profit_pct=self.take_profit_pct,
+            stop_loss_pct=self.stop_loss_pct,
+            trailing_stop_pct=self.trailing_stop_pct,
+            max_hold_seconds=self.max_hold_seconds,
+            scout_min_liquidity_usd=self.scout_min_liquidity_usd,
+            scout_min_volume_5m_usd=self.scout_min_volume_5m_usd,
         )

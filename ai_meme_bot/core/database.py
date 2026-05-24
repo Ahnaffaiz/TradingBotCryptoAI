@@ -475,6 +475,43 @@ class Database:
                 reflection_time=str(
                     stored.get("reflection_time", defaults.reflection_time)
                 ),
+                launch_enabled=_stored_bool(
+                    stored.get("launch_enabled"), defaults.launch_enabled
+                ),
+                scout_enabled=_stored_bool(
+                    stored.get("scout_enabled"), defaults.scout_enabled
+                ),
+                launch_score_threshold=int(
+                    stored.get(
+                        "launch_score_threshold", defaults.launch_score_threshold
+                    )
+                ),
+                scout_score_threshold=int(
+                    stored.get("scout_score_threshold", defaults.scout_score_threshold)
+                ),
+                take_profit_pct=float(
+                    stored.get("take_profit_pct", defaults.take_profit_pct)
+                ),
+                stop_loss_pct=float(
+                    stored.get("stop_loss_pct", defaults.stop_loss_pct)
+                ),
+                trailing_stop_pct=float(
+                    stored.get("trailing_stop_pct", defaults.trailing_stop_pct)
+                ),
+                max_hold_seconds=float(
+                    stored.get("max_hold_seconds", defaults.max_hold_seconds)
+                ),
+                scout_min_liquidity_usd=float(
+                    stored.get(
+                        "scout_min_liquidity_usd", defaults.scout_min_liquidity_usd
+                    )
+                ),
+                scout_min_volume_5m_usd=float(
+                    stored.get(
+                        "scout_min_volume_5m_usd",
+                        defaults.scout_min_volume_5m_usd,
+                    )
+                ),
             )
         except (TypeError, ValueError):
             return defaults
@@ -740,6 +777,12 @@ def _percent_change(start: Any, end: Any) -> Optional[float]:
     if start_value <= 0:
         return None
     return round(((end_value - start_value) / start_value) * 100, 4)
+
+
+def _stored_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _outcome_label(

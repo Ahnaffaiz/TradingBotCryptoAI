@@ -46,15 +46,16 @@ DEXSCREENER_API_BASE=[https://api.dexscreener.com/latest/dex/tokens/](https://ap
 ## 4. System Workflows 
 
 ### A. Detection & Analysis Workflow (Tracker -> AI)
-1.  **Tracker:** Asynchronously polls the Dexscreener API for new tokens.
-2.  **Base Filtering:** Drops tokens if `dexId` is not `pump`, if liquidity is < $10,000, or if token age < 1 minute (to avoid initial graduation dumps).
-3.  **Context Injection:** Passes surviving token data (5m volume, dev holding %, top 10 holders %) to the Hermes AI agent.
+1.  **Tracker:** Asynchronously polls Dexscreener latest profiles for launch-mode tokens and GeckoTerminal Solana trending pools for scout-mode tokens.
+2.  **Base Filtering:** Launch mode drops non-PumpSwap or too-thin pairs. Scout mode additionally requires stronger liquidity, 5m volume, and buy/sell pressure.
+3.  **Context Injection:** Passes surviving token data (5m volume, price trend, buy/sell count, top 10 holders %, X hint, strategy lane) to the Hermes AI agent.
 4.  **AI Evaluation:** The Gemini LLM evaluates the metrics using a System Prompt enriched by daily RAG reflections. Returns a score (0-100).
-5.  **Decision:** If the score meets the live entry threshold (25/100 by default), the AI triggers the `execute_trade` tool.
+5.  **Decision:** If the score meets the active live strategy threshold (25/100 launch, 70/100 scout by default), the AI triggers the `execute_trade` tool.
 
 ### B. Execution Workflow (Toggle Paper/Real)
 *   **If `TRADING_MODE=PAPER`:** 
     Bypasses blockchain. Calls `database.insert_trade()`, deducts the dummy balance, and records the entry price in the SQLite database.
+    Open positions are also protected by hard take-profit, stop-loss, trailing-stop, and max-hold exits before AI exit review.
 *   **If `TRADING_MODE=REAL`:** 
     1. Extracts Keypair from `PRIVATE_KEY_BASE58`.
     2. Constructs a `Swap` instruction to the Pump Swap smart contract using `solders`.

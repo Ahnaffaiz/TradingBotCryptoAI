@@ -61,7 +61,7 @@ async def test_status_redacts_api_key_and_auto_handlers_toggle_state(tmp_path):
     assert "secret-key" not in status
     assert "Auto entries:</b> 🟢 ON" in status
     assert "Reports:</b> 🔔 ON in this chat" in status
-    assert "Entry threshold:</b> score ≥ 25" in status
+    assert "Thresholds:</b> launch ≥ 25 | scout ≥ 70" in status
     assert await database.get_auto_trading() is False
     assert await database.get_notification_chat_id() == 94721
     assert "Auto entries enabled" in update.effective_message.replies[0][0]
@@ -85,7 +85,7 @@ async def test_threshold_command_updates_live_strategy_settings(tmp_path):
         StrategySettings(25, 0.01, 1.0, 0.01, "00:00")
     )
     assert "Use <code>/threshold 25</code>" in update.effective_message.replies[0][0]
-    assert "Entry threshold updated" in update.effective_message.replies[1][0]
+    assert "Launch threshold updated" in update.effective_message.replies[1][0]
     assert "Invalid threshold" in update.effective_message.replies[2][0]
 
 

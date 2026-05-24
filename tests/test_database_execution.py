@@ -6,6 +6,7 @@ from ai_meme_bot.core.database import (
     InsufficientBalanceError,
 )
 from ai_meme_bot.core.execution import TradeExecutor
+from ai_meme_bot.main import _hard_exit_reason
 from ai_meme_bot.models import StrategySettings, TokenEvaluation
 from tests.helpers import make_config, make_snapshot
 
@@ -72,6 +73,30 @@ async def test_strategy_settings_persist_over_startup_defaults(tmp_path):
     await database.set_strategy_settings(tuned)
 
     assert await database.get_strategy_settings(config.strategy_defaults) == tuned
+
+
+def test_hard_exit_rules_trigger_take_profit_and_stop_loss():
+    settings = StrategySettings(
+        25,
+        30.0,
+        0.1,
+        45.0,
+        "00:00",
+        take_profit_pct=15.0,
+        stop_loss_pct=8.0,
+    )
+    trade = type(
+        "Trade",
+        (),
+        {"buy_price": 1.0, "opened_at": "2026-05-22T00:00:00+00:00"},
+    )()
+
+    assert "take profit" in _hard_exit_reason(
+        trade, make_snapshot(price=1.2), settings, 1.2
+    )
+    assert "stop loss" in _hard_exit_reason(
+        trade, make_snapshot(price=0.9), settings, 1.0
+    )
 
 
 @pytest.mark.asyncio

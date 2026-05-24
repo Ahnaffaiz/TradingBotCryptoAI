@@ -131,11 +131,11 @@ class TradingAIService:
         prompt = {
             "task": "Evaluate whether a paper trader may buy this PumpSwap candidate.",
             "strategy": (
-                "Short-term memecoin scalp mode. These tokens are volatile, low-volume, "
-                "and rug-prone, so do not require blue-chip confidence scores. Prefer "
-                "BUY only when the candidate shows a tradable 10-25% pullback/dip, "
-                "recovering buy pressure, usable liquidity, and no strong rug/scam "
-                "warning. Skip pumps that are already extended without a dip."
+                "Aggressive short-term memecoin mode. Launch candidates may use lower "
+                "confidence if fresh momentum is present. Scout candidates are existing "
+                "coins from active/trending pools and require higher confidence: prefer "
+                "dip/reversal, recovering buy pressure, usable liquidity, and no strong "
+                "rug/scam warning. Skip extended pumps without a fresh entry setup."
             ),
             "candidate": snapshot.prompt_payload(),
             "latest_rules": rules or "No learned rules yet.",
@@ -172,7 +172,8 @@ class TradingAIService:
                 "Short-term memecoin scalp mode. Prefer protecting profit over long "
                 "holds. Close quickly when a position has a useful gain, sell pressure "
                 "appears, volume fades, rug/scam language appears, or the trade is "
-                "aging past a 30m, 1h, or 1d scalp window."
+                "aging past its configured scalp window. Hard take-profit, stop-loss, "
+                "trailing-stop, and max-hold rules may close before this AI review."
             ),
             "trade": _trade_prompt_payload(trade),
             "current_snapshot": snapshot.prompt_payload(),
@@ -221,9 +222,19 @@ class TradingAIService:
                 "rules": ["strict rule 1", "strict rule 2", "strict rule 3"],
                 "settings": {
                     "entry_score_threshold": "integer 10..95",
+                    "launch_enabled": "boolean",
+                    "scout_enabled": "boolean",
+                    "launch_score_threshold": "integer 10..95",
+                    "scout_score_threshold": "integer 40..95",
                     "tracker_poll_seconds": "number 10..300",
                     "base_trade_amount": "number 0.01..2.0",
                     "position_review_seconds": "number 15..300",
+                    "take_profit_pct": "number 3..200",
+                    "stop_loss_pct": "number 1..50",
+                    "trailing_stop_pct": "number 0..50",
+                    "max_hold_seconds": "number 60..86400",
+                    "scout_min_liquidity_usd": "number 1000..1000000",
+                    "scout_min_volume_5m_usd": "number 0..1000000",
                     "reflection_time": "HH:MM 24-hour wall clock",
                 },
                 "settings_rationale": "short string",
@@ -313,10 +324,28 @@ def _validated_settings(payload: Any) -> Optional[StrategySettings]:
         tracker_poll = float(payload["tracker_poll_seconds"])
         trade_amount = float(payload["base_trade_amount"])
         review_seconds = float(payload["position_review_seconds"])
+        launch_enabled = _payload_bool(payload.get("launch_enabled", True))
+        scout_enabled = _payload_bool(payload.get("scout_enabled", True))
+        launch_threshold = int(payload.get("launch_score_threshold", threshold))
+        scout_threshold = int(payload.get("scout_score_threshold", 70))
+        take_profit_pct = float(payload.get("take_profit_pct", 18.0))
+        stop_loss_pct = float(payload.get("stop_loss_pct", 8.0))
+        trailing_stop_pct = float(payload.get("trailing_stop_pct", 7.0))
+        max_hold_seconds = float(payload.get("max_hold_seconds", 3600.0))
+        scout_min_liquidity_usd = float(
+            payload.get("scout_min_liquidity_usd", 15000.0)
+        )
+        scout_min_volume_5m_usd = float(
+            payload.get("scout_min_volume_5m_usd", 500.0)
+        )
         reflection_time = str(payload["reflection_time"]).strip()
     except (KeyError, TypeError, ValueError):
         return None
     if not 10 <= threshold <= 95:
+        return None
+    if not 10 <= launch_threshold <= 95:
+        return None
+    if not 40 <= scout_threshold <= 95:
         return None
     if not 10 <= tracker_poll <= 300:
         return None
@@ -324,10 +353,36 @@ def _validated_settings(payload: Any) -> Optional[StrategySettings]:
         return None
     if not 15 <= review_seconds <= 300:
         return None
+    if not 3 <= take_profit_pct <= 200:
+        return None
+    if not 1 <= stop_loss_pct <= 50:
+        return None
+    if not 0 <= trailing_stop_pct <= 50:
+        return None
+    if not 60 <= max_hold_seconds <= 86400:
+        return None
+    if not 1000 <= scout_min_liquidity_usd <= 1000000:
+        return None
+    if not 0 <= scout_min_volume_5m_usd <= 1000000:
+        return None
     if not _valid_hhmm(reflection_time):
         return None
     return StrategySettings(
-        threshold, tracker_poll, trade_amount, review_seconds, reflection_time
+        threshold,
+        tracker_poll,
+        trade_amount,
+        review_seconds,
+        reflection_time,
+        launch_enabled,
+        scout_enabled,
+        launch_threshold,
+        scout_threshold,
+        take_profit_pct,
+        stop_loss_pct,
+        trailing_stop_pct,
+        max_hold_seconds,
+        scout_min_liquidity_usd,
+        scout_min_volume_5m_usd,
     )
 
 
@@ -339,3 +394,9 @@ def _valid_hhmm(value: str) -> bool:
         )
     except (TypeError, ValueError):
         return False
+
+
+def _payload_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}

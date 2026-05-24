@@ -29,6 +29,7 @@ MENU_AUTO_OFF = "🔴 Auto Off"
 MENU_NOTIFY_ON = "🔔 Notify On"
 MENU_NOTIFY_OFF = "🔕 Notify Off"
 MENU_THRESHOLD = "🎚 Threshold"
+MENU_SETTINGS = "⚙️ Settings"
 
 
 class PaperNotifier(Protocol):
@@ -186,10 +187,21 @@ class TelegramTradingBot:
         application.add_handler(CommandHandler("whoami", self.whoami))
         application.add_handler(CommandHandler("menu", self.menu))
         application.add_handler(CommandHandler("status", self.status))
+        application.add_handler(CommandHandler("settings", self.status))
         application.add_handler(CommandHandler("auto_on", self.auto_on))
         application.add_handler(CommandHandler("auto_off", self.auto_off))
         application.add_handler(CommandHandler("threshold", self.threshold))
         application.add_handler(CommandHandler("set_threshold", self.threshold))
+        application.add_handler(CommandHandler("launch_on", self.launch_on))
+        application.add_handler(CommandHandler("launch_off", self.launch_off))
+        application.add_handler(CommandHandler("scout_on", self.scout_on))
+        application.add_handler(CommandHandler("scout_off", self.scout_off))
+        application.add_handler(CommandHandler("launch_threshold", self.launch_threshold))
+        application.add_handler(CommandHandler("scout_threshold", self.scout_threshold))
+        application.add_handler(CommandHandler("take_profit", self.take_profit))
+        application.add_handler(CommandHandler("stop_loss", self.stop_loss))
+        application.add_handler(CommandHandler("trailing_stop", self.trailing_stop))
+        application.add_handler(CommandHandler("max_hold", self.max_hold))
         application.add_handler(CommandHandler("notify_on", self.notify_on))
         application.add_handler(CommandHandler("notify_off", self.notify_off))
         application.add_handler(CommandHandler("hermes", self.hermes))
@@ -204,6 +216,9 @@ class TelegramTradingBot:
         )
         application.add_handler(
             MessageHandler(filters.Regex("^{0}$".format(MENU_THRESHOLD)), self.threshold)
+        )
+        application.add_handler(
+            MessageHandler(filters.Regex("^{0}$".format(MENU_SETTINGS)), self.status)
         )
         application.add_handler(
             MessageHandler(filters.Regex("^{0}$".format(MENU_NOTIFY_ON)), self.notify_on)
@@ -277,7 +292,7 @@ class TelegramTradingBot:
         )
 
     async def threshold(self, update: Any, context: Any) -> None:
-        """Show or update the live paper-entry score threshold."""
+        """Show or update the live launch score threshold."""
 
         await self._register_notification_chat(update)
         settings = await self.database.get_strategy_settings(
@@ -288,9 +303,9 @@ class TelegramTradingBot:
         if not raw_value:
             await _reply(
                 update,
-                "🎚 <b>Entry threshold:</b> score ≥ {0}\n"
+                "🎚 <b>Launch threshold:</b> score ≥ {0}\n"
                 "Use <code>/threshold 25</code> to change it live.".format(
-                    settings.entry_score_threshold
+                    settings.launch_score_threshold
                 ),
                 reply_markup=menu_markup(),
             )
@@ -305,20 +320,123 @@ class TelegramTradingBot:
                 reply_markup=menu_markup(),
             )
             return
-        updated = replace(settings, entry_score_threshold=threshold)
+        updated = replace(
+            settings,
+            entry_score_threshold=threshold,
+            launch_score_threshold=threshold,
+        )
         await self.database.set_strategy_settings(updated)
         await self.database.add_activity(
             "strategy_threshold",
-            "entry score threshold set to {0}".format(threshold),
-            payload={"entry_score_threshold": threshold},
+            "launch score threshold set to {0}".format(threshold),
+            payload={"launch_score_threshold": threshold},
         )
         await _reply(
             update,
-            "✅ <b>Entry threshold updated</b>\n"
-            "The bot may now buy when the AI score is positive and ≥ {0}/100.".format(
+            "✅ <b>Launch threshold updated</b>\n"
+            "Launch mode may now buy when the AI score is positive and ≥ {0}/100.".format(
                 threshold
             ),
             reply_markup=menu_markup(),
+        )
+
+    async def launch_threshold(self, update: Any, context: Any) -> None:
+        """Set launch-mode score threshold."""
+
+        await self._update_int_setting(
+            update,
+            context,
+            "launch_score_threshold",
+            "Launch threshold",
+            0,
+            100,
+        )
+
+    async def launch_on(self, update: Any, _context: Any) -> None:
+        """Enable launch discovery."""
+
+        await self._toggle_strategy(update, "launch_enabled", "Launch mode", True)
+
+    async def launch_off(self, update: Any, _context: Any) -> None:
+        """Disable launch discovery."""
+
+        await self._toggle_strategy(update, "launch_enabled", "Launch mode", False)
+
+    async def scout_threshold(self, update: Any, context: Any) -> None:
+        """Set scout-mode score threshold."""
+
+        await self._update_int_setting(
+            update,
+            context,
+            "scout_score_threshold",
+            "Scout threshold",
+            0,
+            100,
+        )
+
+    async def scout_on(self, update: Any, _context: Any) -> None:
+        """Enable scout discovery."""
+
+        await self._toggle_strategy(update, "scout_enabled", "Scout mode", True)
+
+    async def scout_off(self, update: Any, _context: Any) -> None:
+        """Disable scout discovery."""
+
+        await self._toggle_strategy(update, "scout_enabled", "Scout mode", False)
+
+    async def take_profit(self, update: Any, context: Any) -> None:
+        """Set hard take-profit percentage."""
+
+        await self._update_float_setting(
+            update, context, "take_profit_pct", "Take profit", 0.1, 500.0, "%"
+        )
+
+    async def stop_loss(self, update: Any, context: Any) -> None:
+        """Set hard stop-loss percentage."""
+
+        await self._update_float_setting(
+            update, context, "stop_loss_pct", "Stop loss", 0.1, 100.0, "%"
+        )
+
+    async def trailing_stop(self, update: Any, context: Any) -> None:
+        """Set trailing-stop percentage; zero disables it."""
+
+        await self._update_float_setting(
+            update, context, "trailing_stop_pct", "Trailing stop", 0.0, 100.0, "%"
+        )
+
+    async def max_hold(self, update: Any, context: Any) -> None:
+        """Set maximum paper trade hold time."""
+
+        await self._register_notification_chat(update)
+        settings = await self.database.get_strategy_settings(
+            self.config.strategy_defaults
+        )
+        raw_value = _context_text(context)
+        if not raw_value:
+            await _reply(
+                update,
+                "⏳ <b>Max hold:</b> {0}\nUse <code>/max_hold 60m</code>, "
+                "<code>/max_hold 2h</code>, or <code>/max_hold 1d</code>.".format(
+                    _duration_label(settings.max_hold_seconds)
+                ),
+                reply_markup=menu_markup(),
+            )
+            return
+        seconds = _parse_duration_seconds(raw_value)
+        if seconds is None or seconds <= 0:
+            await _reply(
+                update,
+                "⚠️ <b>Invalid max hold</b>\nUse values like <code>30m</code>, "
+                "<code>1h</code>, or <code>1d</code>.",
+                reply_markup=menu_markup(),
+            )
+            return
+        await self._store_settings(
+            update,
+            replace(settings, max_hold_seconds=seconds),
+            "Max hold",
+            _duration_label(seconds),
         )
 
     async def notify_on(self, update: Any, _context: Any) -> None:
@@ -414,10 +532,20 @@ class TelegramTradingBot:
                 _report_state(notification_chat_id, notifications_enabled)
             ),
             "💰 <b>Paper balance:</b> {0:.6f} SOL".format(balance),
-            "🎚 <b>Entry threshold:</b> score ≥ {0}".format(
-                settings.entry_score_threshold
+            "🎯 <b>Thresholds:</b> launch ≥ {0} | scout ≥ {1}".format(
+                settings.launch_score_threshold, settings.scout_score_threshold
+            ),
+            "🧭 <b>Strategies:</b> launch {0} | scout {1}".format(
+                "ON" if settings.launch_enabled else "OFF",
+                "ON" if settings.scout_enabled else "OFF",
             ),
             "📦 <b>Trade size:</b> {0:.6f} SOL".format(settings.base_trade_amount),
+            "🛡 <b>Hard exits:</b> TP {0:g}% | SL {1:g}% | trail {2:g}% | max {3}".format(
+                settings.take_profit_pct,
+                settings.stop_loss_pct,
+                settings.trailing_stop_pct,
+                _duration_label(settings.max_hold_seconds),
+            ),
             "⏱ <b>Cadence:</b> discover {0:g}s | exits {1:g}s".format(
                 settings.tracker_poll_seconds, settings.position_review_seconds
             ),
@@ -444,9 +572,19 @@ class TelegramTradingBot:
                     BotCommand("menu", "show paper bot controls"),
                     BotCommand("whoami", "show Telegram user id"),
                     BotCommand("status", "show paper trading status"),
+                    BotCommand("settings", "show strategy settings"),
                     BotCommand("auto_on", "enable paper auto entries"),
                     BotCommand("auto_off", "pause paper auto entries"),
-                    BotCommand("threshold", "set live buy score threshold"),
+                    BotCommand("launch_on", "enable launch scanner"),
+                    BotCommand("launch_off", "disable launch scanner"),
+                    BotCommand("scout_on", "enable scout scanner"),
+                    BotCommand("scout_off", "disable scout scanner"),
+                    BotCommand("threshold", "set launch buy score threshold"),
+                    BotCommand("scout_threshold", "set scout buy score threshold"),
+                    BotCommand("take_profit", "set hard take profit percent"),
+                    BotCommand("stop_loss", "set hard stop loss percent"),
+                    BotCommand("trailing_stop", "set trailing stop percent"),
+                    BotCommand("max_hold", "set maximum hold time"),
                     BotCommand("notify_on", "enable analysis reports"),
                     BotCommand("notify_off", "mute analysis reports"),
                     BotCommand("hermes", "admin workspace operator"),
@@ -460,6 +598,115 @@ class TelegramTradingBot:
         chat_id = getattr(chat, "id", None)
         if chat_id is not None:
             await self.database.set_notification_chat_id(int(chat_id))
+
+    async def _toggle_strategy(
+        self, update: Any, field_name: str, label: str, enabled: bool
+    ) -> None:
+        await self._register_notification_chat(update)
+        settings = await self.database.get_strategy_settings(
+            self.config.strategy_defaults
+        )
+        await self._store_settings(
+            update,
+            replace(settings, **{field_name: enabled}),
+            label,
+            "ON" if enabled else "OFF",
+        )
+
+    async def _update_int_setting(
+        self,
+        update: Any,
+        context: Any,
+        field_name: str,
+        label: str,
+        minimum: int,
+        maximum: int,
+    ) -> None:
+        await self._register_notification_chat(update)
+        settings = await self.database.get_strategy_settings(
+            self.config.strategy_defaults
+        )
+        raw_value = _context_text(context)
+        current_value = getattr(settings, field_name)
+        if not raw_value:
+            await _reply(
+                update,
+                "🎚 <b>{0}:</b> {1}\nUse <code>/{2} {1}</code> to change it.".format(
+                    _html(label), current_value, field_name.replace("_score", "")
+                ),
+                reply_markup=menu_markup(),
+            )
+            return
+        value = _parse_score_threshold(raw_value)
+        if value is None or value < minimum or value > maximum:
+            await _reply(
+                update,
+                "⚠️ <b>Invalid {0}</b>\nSend a whole number from <code>{1}</code> "
+                "to <code>{2}</code>.".format(_html(label.lower()), minimum, maximum),
+                reply_markup=menu_markup(),
+            )
+            return
+        await self._store_settings(
+            update, replace(settings, **{field_name: value}), label, str(value)
+        )
+
+    async def _update_float_setting(
+        self,
+        update: Any,
+        context: Any,
+        field_name: str,
+        label: str,
+        minimum: float,
+        maximum: float,
+        suffix: str,
+    ) -> None:
+        await self._register_notification_chat(update)
+        settings = await self.database.get_strategy_settings(
+            self.config.strategy_defaults
+        )
+        raw_value = _context_text(context)
+        current_value = getattr(settings, field_name)
+        if not raw_value:
+            await _reply(
+                update,
+                "🎚 <b>{0}:</b> {1:g}{2}".format(
+                    _html(label), current_value, _html(suffix)
+                ),
+                reply_markup=menu_markup(),
+            )
+            return
+        value = _parse_float(raw_value)
+        if value is None or value < minimum or value > maximum:
+            await _reply(
+                update,
+                "⚠️ <b>Invalid {0}</b>\nSend a number from <code>{1:g}</code> "
+                "to <code>{2:g}</code>.".format(_html(label.lower()), minimum, maximum),
+                reply_markup=menu_markup(),
+            )
+            return
+        await self._store_settings(
+            update,
+            replace(settings, **{field_name: value}),
+            label,
+            "{0:g}{1}".format(value, suffix),
+        )
+
+    async def _store_settings(
+        self, update: Any, settings: Any, label: str, rendered_value: str
+    ) -> None:
+        await self.database.set_strategy_settings(settings)
+        await self.database.add_activity(
+            "strategy_settings",
+            "{0} set to {1}".format(label, rendered_value),
+            payload=settings.prompt_payload(),
+        )
+        await _reply(
+            update,
+            "✅ <b>{0} updated</b>\nNow set to <code>{1}</code>.".format(
+                _html(label), _html(rendered_value)
+            ),
+            reply_markup=menu_markup(),
+        )
 
 
 async def _reply(update: Any, text: str, reply_markup: Any = None) -> None:
@@ -502,6 +749,7 @@ def format_entry_analysis(snapshot: TokenSnapshot, evaluation: TokenEvaluation) 
     return "\n".join(
         [
             "{0} <b>Paper Entry Analysis</b>".format(_entry_icon(evaluation)),
+            "🎯 <b>Strategy:</b> {0}".format(_html(snapshot.strategy.upper())),
             "🪙 <b>Token:</b> <code>{0}</code>".format(_html(snapshot.token_address)),
             "🔗 <b>Pair:</b> <code>{0}</code>".format(_html(snapshot.pair_address)),
             "🧠 <b>Decision:</b> {0} | <b>Score:</b> {1}/100".format(
@@ -557,6 +805,7 @@ def format_buy_result(
                 "#{0}".format(result.trade_id) if result.trade_id else "n/a"
             ),
             "🧠 <b>AI score:</b> {0}/100".format(evaluation.score),
+            "🎯 <b>Strategy:</b> {0}".format(_html(snapshot.strategy.upper())),
             "ℹ️ <b>Detail:</b> {0}".format(_html(result.message)),
         ]
     )
@@ -643,7 +892,7 @@ def menu_text() -> str:
     return (
         "🎛 <b>Paper Bot Menu</b>\n"
         "📊 Check status, 🟢 enable entries, 🔴 pause entries,\n"
-        "🎚 inspect threshold, 🔔 receive reports, or 🔕 mute reports."
+        "🎚 inspect threshold, ⚙️ settings, 🔔 reports, or 🔕 mute."
     )
 
 
@@ -654,7 +903,7 @@ def menu_markup() -> Any:
 
     return ReplyKeyboardMarkup(
         [
-            [MENU_STATUS, MENU_THRESHOLD],
+            [MENU_STATUS, MENU_THRESHOLD, MENU_SETTINGS],
             [MENU_AUTO_ON, MENU_AUTO_OFF],
             [MENU_NOTIFY_ON, MENU_NOTIFY_OFF],
         ],
@@ -695,6 +944,50 @@ def _parse_score_threshold(raw_value: str) -> Optional[int]:
     if threshold < 0 or threshold > 100:
         return None
     return threshold
+
+
+def _context_text(context: Any) -> str:
+    return " ".join(getattr(context, "args", []) or []).strip()
+
+
+def _parse_float(raw_value: str) -> Optional[float]:
+    value = raw_value.strip()
+    if value.endswith("%"):
+        value = value[:-1].strip()
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
+def _parse_duration_seconds(raw_value: str) -> Optional[float]:
+    value = raw_value.strip().lower()
+    multiplier = 1.0
+    if value.endswith("m"):
+        multiplier = 60.0
+        value = value[:-1]
+    elif value.endswith("h"):
+        multiplier = 3600.0
+        value = value[:-1]
+    elif value.endswith("d"):
+        multiplier = 86400.0
+        value = value[:-1]
+    elif value.endswith("s"):
+        value = value[:-1]
+    try:
+        return float(value.strip()) * multiplier
+    except ValueError:
+        return None
+
+
+def _duration_label(seconds: float) -> str:
+    if seconds >= 86400 and seconds % 86400 == 0:
+        return "{0:g}d".format(seconds / 86400)
+    if seconds >= 3600 and seconds % 3600 == 0:
+        return "{0:g}h".format(seconds / 3600)
+    if seconds >= 60 and seconds % 60 == 0:
+        return "{0:g}m".format(seconds / 60)
+    return "{0:g}s".format(seconds)
 
 
 def _report_state(chat_id: Optional[int], notifications_enabled: bool) -> str:

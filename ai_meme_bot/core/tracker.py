@@ -20,7 +20,7 @@ from typing import (
 import aiohttp
 
 from ai_meme_bot.config import AppConfig
-from ai_meme_bot.models import FilteredToken, TokenSnapshot, utc_now
+from ai_meme_bot.models import FilteredToken, StrategySettings, TokenSnapshot, utc_now
 
 
 class TrackerError(RuntimeError):
@@ -64,6 +64,9 @@ class TokenTracker:
         time_fn=time.time,
         filtered_callback: Optional[Callable[[FilteredToken], Awaitable[None]]] = None,
         poll_seconds_callback: Optional[Callable[[], Awaitable[float]]] = None,
+        strategy_settings_callback: Optional[
+            Callable[[], Awaitable[StrategySettings]]
+        ] = None,
     ) -> None:
         self.config = config
         self._session = session
@@ -71,6 +74,7 @@ class TokenTracker:
         self._time_fn = time_fn
         self._filtered_callback = filtered_callback
         self._poll_seconds_callback = poll_seconds_callback
+        self._strategy_settings_callback = strategy_settings_callback
         self._logged_filter_keys = set()
 
     async def __aenter__(self) -> "TokenTracker":
@@ -421,28 +425,86 @@ class TokenTracker:
         return payload if isinstance(payload, dict) else None
 
     async def discover(self) -> AsyncIterator[TokenSnapshot]:
-        """Continuously yield new filtered PumpSwap snapshots."""
+        """Continuously yield launch and scout PumpSwap snapshots."""
 
         seen = set()
         while True:
-            addresses = [
-                token_address
-                for token_address in await self.fetch_profiles()
-                if token_address not in seen
-            ]
+            settings = await self._strategy_settings()
+            addresses: List[str] = []
+            if settings.launch_enabled:
+                addresses.extend(
+                    token_address
+                    for token_address in await self.fetch_profiles()
+                    if token_address not in seen
+                )
             for chunk in _chunks(addresses, 30):
                 for snapshot in await self.snapshots_for_tokens(chunk):
+                    snapshot.strategy = "launch"
                     seen.add(snapshot.token_address)
                     yield snapshot
+            if settings.scout_enabled:
+                scout_addresses = [
+                    token_address
+                    for token_address in await self.fetch_scout_token_addresses()
+                    if token_address not in seen
+                ]
+                for chunk in _chunks(scout_addresses, 30):
+                    for snapshot in await self.snapshots_for_tokens(
+                        chunk, apply_filters=False
+                    ):
+                        snapshot.strategy = "scout"
+                        if not _passes_scout_filters(snapshot, settings):
+                            continue
+                        seen.add(snapshot.token_address)
+                        yield snapshot
             poll_seconds = self.config.tracker_poll_seconds
             if self._poll_seconds_callback is not None:
                 poll_seconds = await self._poll_seconds_callback()
             await asyncio.sleep(poll_seconds)
 
+    async def fetch_scout_token_addresses(self) -> List[str]:
+        """Return active existing Solana mints from GeckoTerminal trending pools."""
+
+        trending_pools = await self.fetch_geckoterminal_trending_pools()
+        if not trending_pools:
+            return []
+        addresses = []
+        seen = set()
+        for key in trending_pools:
+            if not key.startswith("token:"):
+                continue
+            token_address = key[len("token:") :]
+            if token_address and token_address not in seen:
+                seen.add(token_address)
+                addresses.append(token_address)
+        return addresses
+
+    async def _strategy_settings(self) -> StrategySettings:
+        if self._strategy_settings_callback is None:
+            return self.config.strategy_defaults
+        return await self._strategy_settings_callback()
+
 
 def _chunks(values: Sequence[str], size: int) -> Iterable[Sequence[str]]:
     for index in range(0, len(values), size):
         yield values[index : index + size]
+
+
+def _passes_scout_filters(snapshot: TokenSnapshot, settings: StrategySettings) -> bool:
+    if snapshot.liquidity_usd < settings.scout_min_liquidity_usd:
+        return False
+    if snapshot.volume_5m_usd < settings.scout_min_volume_5m_usd:
+        return False
+    if snapshot.x_sentiment_hint == "risk-language":
+        return False
+    if snapshot.buys_5m is not None and snapshot.sells_5m is not None:
+        if snapshot.buys_5m < snapshot.sells_5m:
+            return False
+    if snapshot.price_change_1h_pct is not None and snapshot.price_change_1h_pct > 80:
+        return False
+    if snapshot.price_change_5m_pct is not None and snapshot.price_change_5m_pct < -25:
+        return False
+    return True
 
 
 def _nullable_float(value: Any) -> Optional[float]:

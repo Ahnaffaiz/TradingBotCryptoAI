@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, time as clock_time, timedelta
+from datetime import datetime, time as clock_time, timedelta, timezone
 from typing import Any, List
 from zoneinfo import ZoneInfo
 
@@ -47,19 +47,23 @@ async def run_discovery_loop(
             analysis_id = await database.record_analysis(snapshot, evaluation)
             await database.add_activity(
                 "analysis",
-                "{0} score {1}".format(evaluation.decision, evaluation.score),
+                "{0} {1} score {2}".format(
+                    snapshot.strategy, evaluation.decision, evaluation.score
+                ),
                 snapshot.token_address,
                 {
                     "analysis_id": analysis_id,
                     "pair_address": snapshot.pair_address,
                     "rationale": evaluation.rationale,
+                    "strategy": snapshot.strategy,
                 },
             )
             await notifier.entry_analysis(snapshot, evaluation)
             settings = await database.get_strategy_settings(config.strategy_defaults)
+            threshold = _entry_threshold(settings, snapshot.strategy)
             if (
                 evaluation.score > 0
-                and evaluation.score >= settings.entry_score_threshold
+                and evaluation.score >= threshold
             ):
                 result = await tools.trigger_buy(snapshot.token_address, snapshot)
                 if result.success:
@@ -68,7 +72,12 @@ async def run_discovery_loop(
                     "paper_buy" if result.success else "paper_buy_rejected",
                     result.message,
                     snapshot.token_address,
-                    {"analysis_id": analysis_id, "trade_id": result.trade_id},
+                    {
+                        "analysis_id": analysis_id,
+                        "trade_id": result.trade_id,
+                        "strategy": snapshot.strategy,
+                        "threshold": threshold,
+                    },
                 )
                 await notifier.buy_result(snapshot, evaluation, result)
                 LOGGER.info(
@@ -97,6 +106,7 @@ async def run_position_review_loop(
 ) -> None:
     """Refresh open trades and close only on validated AI exit decisions."""
 
+    high_watermarks: dict[int, float] = {}
     while True:
         try:
             rules = await database.get_latest_rules()
@@ -116,6 +126,31 @@ async def run_position_review_loop(
                 )
                 if snapshot is None:
                     continue
+                settings = await database.get_strategy_settings(config.strategy_defaults)
+                high_watermarks[trade.id] = max(
+                    high_watermarks.get(trade.id, trade.buy_price),
+                    snapshot.price_usd,
+                )
+                hard_exit_reason = _hard_exit_reason(
+                    trade, snapshot, settings, high_watermarks[trade.id]
+                )
+                if hard_exit_reason is not None:
+                    decision = ExitDecision("close", hard_exit_reason)
+                    result = await executor.close_trade(trade, snapshot, hard_exit_reason)
+                    high_watermarks.pop(trade.id, None)
+                    await database.add_activity(
+                        "paper_sell" if result.success else "paper_sell_rejected",
+                        result.message,
+                        trade.token_address,
+                        {
+                            "trade_id": trade.id,
+                            "pnl": result.pnl,
+                            "exit_type": "hard_rule",
+                            "reason": hard_exit_reason,
+                        },
+                    )
+                    await notifier.sell_result(trade, snapshot, decision, result)
+                    continue
                 decision = await ai_service.evaluate_exit(trade, snapshot, rules)
                 await database.add_activity(
                     "exit_analysis",
@@ -130,6 +165,7 @@ async def run_position_review_loop(
                 await notifier.exit_analysis(trade, snapshot, decision)
                 if decision.wants_close:
                     result = await executor.close_trade(trade, snapshot, decision.rationale)
+                    high_watermarks.pop(trade.id, None)
                     await database.add_activity(
                         "paper_sell" if result.success else "paper_sell_rejected",
                         result.message,
@@ -157,6 +193,58 @@ async def run_position_review_loop(
                 )
         settings = await database.get_strategy_settings(config.strategy_defaults)
         await asyncio.sleep(settings.position_review_seconds)
+
+
+def _entry_threshold(settings: Any, strategy: str) -> int:
+    if strategy == "scout":
+        return settings.scout_score_threshold
+    if strategy == "launch":
+        return settings.launch_score_threshold
+    return settings.entry_score_threshold
+
+
+def _hard_exit_reason(
+    trade: Any, snapshot: Any, settings: Any, high_price: float
+) -> str | None:
+    change_pct = _pct_change(trade.buy_price, snapshot.price_usd)
+    if change_pct is None:
+        return None
+    if change_pct >= settings.take_profit_pct:
+        return "take profit {0:.2f}% >= {1:g}%".format(
+            change_pct, settings.take_profit_pct
+        )
+    if change_pct <= -settings.stop_loss_pct:
+        return "stop loss {0:.2f}% <= -{1:g}%".format(
+            change_pct, settings.stop_loss_pct
+        )
+    if settings.trailing_stop_pct > 0 and high_price > trade.buy_price:
+        trail_pct = _pct_change(high_price, snapshot.price_usd)
+        if trail_pct is not None and trail_pct <= -settings.trailing_stop_pct:
+            return "trailing stop {0:.2f}% from high <= -{1:g}%".format(
+                trail_pct, settings.trailing_stop_pct
+            )
+    opened_at = _parse_iso_datetime(trade.opened_at)
+    if opened_at is not None:
+        age_seconds = (datetime.now(timezone.utc) - opened_at).total_seconds()
+        if age_seconds >= settings.max_hold_seconds:
+            return "max hold {0:g}s reached".format(settings.max_hold_seconds)
+    return None
+
+
+def _pct_change(start: float, end: float) -> float | None:
+    if start <= 0:
+        return None
+    return ((end - start) / start) * 100
+
+
+def _parse_iso_datetime(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 async def run_reflection_loop(
@@ -294,10 +382,14 @@ async def run(config: AppConfig) -> None:
             await database.get_strategy_settings(config.strategy_defaults)
         ).tracker_poll_seconds
 
+    async def strategy_settings() -> Any:
+        return await database.get_strategy_settings(config.strategy_defaults)
+
     async with TokenTracker(
         config,
         filtered_callback=record_filtered_token,
         poll_seconds_callback=poll_seconds,
+        strategy_settings_callback=strategy_settings,
     ) as tracker:
         tools = TradingTools(config, database, tracker, executor)
         telegram = TelegramTradingBot(config, database)

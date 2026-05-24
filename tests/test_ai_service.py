@@ -101,5 +101,7 @@ async def test_reflection_accepts_only_bounded_strategy_settings():
     tuned = await service.generate_reflection(evidence, defaults)
     rejected = await service.generate_reflection(evidence, defaults)
 
-    assert tuned.settings == StrategySettings(84, 20.0, 0.2, 25.0, "01:30")
+    assert tuned.settings == StrategySettings(
+        84, 20.0, 0.2, 25.0, "01:30", launch_score_threshold=84
+    )
     assert rejected.settings is None

@@ -274,3 +274,50 @@ async def test_geckoterminal_trend_matches_solana_base_token(tmp_path):
 
     assert snapshot.geckoterminal_trending is True
     assert snapshot.geckoterminal_trending_rank == 1
+
+
+@pytest.mark.asyncio
+async def test_scout_discovery_uses_trending_pools_and_filters(tmp_path):
+    config = make_config(
+        tmp_path / "trades.db",
+        launch_enabled=False,
+        scout_enabled=True,
+        tracker_poll_seconds=0,
+    )
+    session = FakeSession(
+        {
+            config.geckoterminal_trending_url: {
+                "data": [
+                    {
+                        "attributes": {"address": "pool-a"},
+                        "relationships": {
+                            "base_token": {
+                                "data": {"id": "solana_mint-a", "type": "token"}
+                            }
+                        },
+                    }
+                ]
+            },
+            "{0}/solana/mint-a".format(config.dexscreener_token_url): [
+                {
+                    "dexId": "pumpswap",
+                    "pairAddress": "pair-a",
+                    "baseToken": {"address": "mint-a"},
+                    "priceUsd": "0.5",
+                    "liquidity": {"usd": 20000},
+                    "volume": {"m5": 900},
+                    "priceChange": {"m5": 4, "h1": -12},
+                    "txns": {"m5": {"buys": 21, "sells": 10}},
+                    "pairCreatedAt": 100000,
+                }
+            ],
+        }
+    )
+    tracker = TokenTracker(config, session=session, time_fn=lambda: 200.0)
+    discovery = tracker.discover()
+
+    snapshot = await discovery.__anext__()
+    await discovery.aclose()
+
+    assert snapshot.token_address == "mint-a"
+    assert snapshot.strategy == "scout"
