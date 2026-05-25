@@ -90,6 +90,26 @@ async def test_threshold_command_updates_live_strategy_settings(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dynamic_setup_commands_toggle_strategy_settings(tmp_path):
+    config = make_config(tmp_path / "trades.db")
+    database = Database(config.db_path)
+    await database.init_db()
+    bot = TelegramTradingBot(config, database)
+    update = FakeUpdate()
+
+    await bot.dynamic_setup(update, None)
+    await bot.dynamic_setup_off(update, None)
+    disabled = await database.get_strategy_settings(config.strategy_defaults)
+    await bot.dynamic_setup_on(update, None)
+    enabled = await database.get_strategy_settings(config.strategy_defaults)
+
+    assert "Dynamic setup:</b> ON" in update.effective_message.replies[0][0]
+    assert "Dynamic setup updated" in update.effective_message.replies[1][0]
+    assert disabled.dynamic_setup_enabled is False
+    assert enabled.dynamic_setup_enabled is True
+
+
+@pytest.mark.asyncio
 async def test_telegram_notifier_sends_analysis_and_trade_reports(tmp_path):
     config = make_config(tmp_path / "trades.db")
     database = Database(config.db_path)

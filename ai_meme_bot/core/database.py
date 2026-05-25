@@ -534,6 +534,10 @@ class Database:
                         defaults.scout_min_volume_5m_usd,
                     )
                 ),
+                dynamic_setup_enabled=_stored_bool(
+                    stored.get("dynamic_setup_enabled"),
+                    defaults.dynamic_setup_enabled,
+                ),
             )
         except (TypeError, ValueError):
             return defaults

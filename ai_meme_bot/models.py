@@ -147,6 +147,7 @@ class StrategySettings:
     max_hold_seconds: float = 3600.0
     scout_min_liquidity_usd: float = 15000.0
     scout_min_volume_5m_usd: float = 500.0
+    dynamic_setup_enabled: bool = True
 
     def prompt_payload(self) -> Dict[str, Any]:
         return asdict(self)

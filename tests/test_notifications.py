@@ -1,11 +1,12 @@
 import asyncio
+from dataclasses import replace
 
 import pytest
 
 from ai_meme_bot.core.database import Database
 from ai_meme_bot.core.execution import TradeExecutor
 from ai_meme_bot.main import run_discovery_loop, run_position_review_loop
-from ai_meme_bot.models import ExitDecision, TokenEvaluation, TradeResult
+from ai_meme_bot.models import ExitDecision, TokenEvaluation, TradePlan, TradeResult
 from tests.helpers import make_config, make_snapshot
 
 
@@ -26,14 +27,40 @@ class TakeProfitTracker:
         return make_snapshot(price=1.2, token=token_address)
 
 
+def dynamic_plan() -> TradePlan:
+    return TradePlan(
+        entry_amount_sol=0.1,
+        stop_loss_pct=8.0,
+        take_profit_targets_pct=[18.0],
+        trailing_stop_pct=7.0,
+        max_hold_seconds=3600.0,
+        rationale="bounded setup",
+    )
+
+
 class BuyAI:
     async def evaluate_entry(self, _snapshot, _rules):
-        return TokenEvaluation(score=95, decision="buy", rationale="paper entry")
+        return TokenEvaluation(
+            score=95,
+            decision="buy",
+            rationale="paper entry",
+            trade_plan=dynamic_plan(),
+        )
 
 
 class ThresholdBuyAI:
     async def evaluate_entry(self, _snapshot, _rules):
-        return TokenEvaluation(score=25, decision="buy", rationale="paper entry")
+        return TokenEvaluation(
+            score=25,
+            decision="buy",
+            rationale="paper entry",
+            trade_plan=dynamic_plan(),
+        )
+
+
+class LegacyBuyAI:
+    async def evaluate_entry(self, _snapshot, _rules):
+        return TokenEvaluation(score=95, decision="buy", rationale="no setup")
 
 
 class ThresholdSkipAI:
@@ -126,12 +153,58 @@ async def test_discovery_buys_when_score_meets_threshold(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_discovery_score_threshold_overrides_skip_decision(tmp_path):
+async def test_dynamic_discovery_requires_trade_plan(tmp_path):
+    config = make_config(tmp_path / "trades.db", entry_score_threshold=20)
+    database = Database(config.db_path)
+    await database.init_db()
+    await database.set_auto_trading(True)
+    notifier = CaptureNotifier()
+
+    await run_discovery_loop(
+        database,
+        OneSnapshotTracker(),
+        LegacyBuyAI(),
+        BuyTools(),
+        config,
+        notifier,
+    )
+
+    assert notifier.events == [("analysis", "mint-1", 95)]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_discovery_requires_buy_decision(tmp_path):
     config = make_config(
         tmp_path / "trades.db", entry_score_threshold=20, launch_score_threshold=20
     )
     database = Database(config.db_path)
     await database.init_db()
+    await database.set_auto_trading(True)
+    notifier = CaptureNotifier()
+
+    await run_discovery_loop(
+        database,
+        OneSnapshotTracker(),
+        ThresholdSkipAI(),
+        BuyTools(),
+        config,
+        notifier,
+    )
+
+    assert notifier.events == [("analysis", "mint-1", 35)]
+
+
+@pytest.mark.asyncio
+async def test_static_discovery_score_threshold_overrides_skip_decision(tmp_path):
+    config = make_config(
+        tmp_path / "trades.db", entry_score_threshold=20, launch_score_threshold=20
+    )
+    database = Database(config.db_path)
+    await database.init_db()
+    settings = await database.get_strategy_settings(config.strategy_defaults)
+    await database.set_strategy_settings(
+        replace(settings, dynamic_setup_enabled=False)
+    )
     await database.set_auto_trading(True)
     notifier = CaptureNotifier()
 

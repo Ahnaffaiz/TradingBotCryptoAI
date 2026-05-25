@@ -49,7 +49,11 @@ class TradingTools:
         if chosen_snapshot is None:
             return TradeResult(False, "Token has no eligible PumpSwap snapshot.")
         settings = await self.database.get_strategy_settings(self.config.strategy_defaults)
-        plan = evaluation.trade_plan if evaluation else None
+        plan = (
+            evaluation.trade_plan
+            if evaluation and settings.dynamic_setup_enabled
+            else None
+        )
         entry_amount = plan.entry_amount_sol if plan else settings.base_trade_amount
         balance = await self.database.get_balance()
         if balance <= 0:

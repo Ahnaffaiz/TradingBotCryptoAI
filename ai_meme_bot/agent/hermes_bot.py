@@ -220,6 +220,9 @@ class TelegramTradingBot:
         application.add_handler(CommandHandler("stop_loss", self.stop_loss))
         application.add_handler(CommandHandler("trailing_stop", self.trailing_stop))
         application.add_handler(CommandHandler("max_hold", self.max_hold))
+        application.add_handler(CommandHandler("dynamic_setup", self.dynamic_setup))
+        application.add_handler(CommandHandler("dynamic_setup_on", self.dynamic_setup_on))
+        application.add_handler(CommandHandler("dynamic_setup_off", self.dynamic_setup_off))
         application.add_handler(CommandHandler("notify_on", self.notify_on))
         application.add_handler(CommandHandler("notify_off", self.notify_off))
         application.add_handler(CommandHandler("hermes", self.hermes))
@@ -539,6 +542,40 @@ class TelegramTradingBot:
             _duration_label(seconds),
         )
 
+    async def dynamic_setup(self, update: Any, _context: Any) -> None:
+        """Show dynamic per-trade setup mode and guardrails."""
+
+        await self._register_notification_chat(update)
+        settings = await self.database.get_strategy_settings(
+            self.config.strategy_defaults
+        )
+        max_entry_size = min(2.0, max(settings.base_trade_amount * 3.0, 0.01))
+        await _reply(
+            update,
+            "🧠 <b>Dynamic setup:</b> {0}\n"
+            "📦 <b>AI size:</b> 0.01..{1:g} SOL\n"
+            "🛡 <b>AI exits:</b> SL 1..50% | TP 3..500% | trail 0..50% | max 60s..1d\n"
+            "Use <code>/dynamic_setup_on</code> or <code>/dynamic_setup_off</code>.".format(
+                "ON" if settings.dynamic_setup_enabled else "OFF",
+                max_entry_size,
+            ),
+            reply_markup=menu_markup(),
+        )
+
+    async def dynamic_setup_on(self, update: Any, _context: Any) -> None:
+        """Require AI buy decisions and per-trade setup for new entries."""
+
+        await self._toggle_strategy(
+            update, "dynamic_setup_enabled", "Dynamic setup", True
+        )
+
+    async def dynamic_setup_off(self, update: Any, _context: Any) -> None:
+        """Use static size and exit settings for new entries."""
+
+        await self._toggle_strategy(
+            update, "dynamic_setup_enabled", "Dynamic setup", False
+        )
+
     async def notify_on(self, update: Any, _context: Any) -> None:
         """Enable Telegram analysis and paper-trade reports."""
 
@@ -640,6 +677,11 @@ class TelegramTradingBot:
                 "ON" if settings.scout_enabled else "OFF",
             ),
             "📦 <b>Trade size:</b> {0:.6f} SOL".format(settings.base_trade_amount),
+            "🧠 <b>Setup:</b> {0}".format(
+                "dynamic AI per trade"
+                if settings.dynamic_setup_enabled
+                else "static settings"
+            ),
             "🛡 <b>Hard exits:</b> TP {0:g}% | SL {1:g}% | trail {2:g}% | max {3}".format(
                 settings.take_profit_pct,
                 settings.stop_loss_pct,
@@ -745,6 +787,7 @@ class TelegramTradingBot:
                     plan.trailing_stop_pct,
                     _duration_label(plan.max_hold_seconds),
                 ),
+                "🧠 <b>Setup mode:</b> {0}".format(_trade_setup_label(trade)),
                 "📝 <b>Plan:</b> {0}".format(
                     _html(plan.rationale or "No AI setup rationale stored.")
                 ),
@@ -856,6 +899,9 @@ class TelegramTradingBot:
                     BotCommand("stop_loss", "set hard stop loss percent"),
                     BotCommand("trailing_stop", "set trailing stop percent"),
                     BotCommand("max_hold", "set maximum hold time"),
+                    BotCommand("dynamic_setup", "show dynamic setup mode"),
+                    BotCommand("dynamic_setup_on", "enable AI trade setup"),
+                    BotCommand("dynamic_setup_off", "use static trade setup"),
                     BotCommand("notify_on", "enable analysis reports"),
                     BotCommand("notify_off", "mute analysis reports"),
                     BotCommand("hermes", "admin workspace operator"),
@@ -1102,6 +1148,7 @@ def format_entry_analysis(snapshot: TokenSnapshot, evaluation: TokenEvaluation) 
     if evaluation.trade_plan is not None:
         lines.extend(
             [
+                "🧠 <b>Setup mode:</b> dynamic AI",
                 "📦 <b>AI size:</b> {0:.6f} SOL".format(
                     evaluation.trade_plan.entry_amount_sol
                 ),
@@ -1137,6 +1184,9 @@ def format_buy_result(
                 "{0:.6f} SOL".format(evaluation.trade_plan.entry_amount_sol)
                 if evaluation.trade_plan
                 else "default"
+            ),
+            "🧠 <b>Setup mode:</b> {0}".format(
+                "dynamic AI" if evaluation.trade_plan else "static settings"
             ),
             "ℹ️ <b>Detail:</b> {0}".format(_html(result.message)),
         ]
@@ -1424,6 +1474,16 @@ def _trade_plan_from_json(trade: TradeRecord) -> TradePlan:
         )
     except (TypeError, ValueError):
         return fallback
+
+
+def _trade_setup_label(trade: TradeRecord) -> str:
+    try:
+        payload = json.loads(trade.trade_plan_json or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    if isinstance(payload, dict) and bool(payload):
+        return "dynamic AI"
+    return "static settings"
 
 
 def _format_targets(targets: List[float]) -> str:

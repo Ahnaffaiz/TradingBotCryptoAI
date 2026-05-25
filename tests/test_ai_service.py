@@ -82,6 +82,25 @@ async def test_entry_accepts_bounded_ai_trade_plan():
 
 
 @pytest.mark.asyncio
+async def test_entry_infers_missing_dynamic_trade_plan():
+    service = TradingAIService(
+        FakeBackend(['{"score": 80, "decision": "buy", "rationale": "momentum"}'])
+    )
+
+    evaluation = await service.evaluate_entry(
+        make_snapshot(),
+        "",
+        StrategySettings(25, 30.0, 0.5, 45.0, "00:00"),
+    )
+
+    assert evaluation.wants_buy is True
+    assert evaluation.trade_plan is not None
+    assert 0.01 <= evaluation.trade_plan.entry_amount_sol <= 1.5
+    assert evaluation.trade_plan.stop_loss_pct > 0
+    assert evaluation.trade_plan.take_profit_targets_pct
+
+
+@pytest.mark.asyncio
 async def test_exit_and_reflection_require_structured_decisions():
     service = TradingAIService(
         FakeBackend(
@@ -134,3 +153,27 @@ async def test_reflection_accepts_only_bounded_strategy_settings():
         84, 20.0, 0.2, 25.0, "01:30", launch_score_threshold=84
     )
     assert rejected.settings is None
+
+
+@pytest.mark.asyncio
+async def test_reflection_preserves_telegram_dynamic_setup_toggle():
+    evidence = ReflectionEvidence(recent_analyses=[{"token_address": "mint-1"}])
+    service = TradingAIService(
+        FakeBackend(
+            [
+                (
+                    '{"rules": ["Rule a", "Rule b", "Rule c"], "settings": {'
+                    '"entry_score_threshold": 84, "tracker_poll_seconds": 20, '
+                    '"base_trade_amount": 0.2, "position_review_seconds": 25, '
+                    '"reflection_time": "01:30"}}'
+                )
+            ]
+        )
+    )
+    current = StrategySettings(
+        25, 30.0, 0.1, 45.0, "00:00", dynamic_setup_enabled=False
+    )
+
+    tuned = await service.generate_reflection(evidence, current)
+
+    assert tuned.settings.dynamic_setup_enabled is False

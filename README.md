@@ -69,6 +69,9 @@ Telegram commands:
 - `/stop_loss <pct>` sets the hard stop-loss exit.
 - `/trailing_stop <pct>` sets the hard trailing-stop exit; `0` disables it.
 - `/max_hold <30m|1h|1d>` sets the maximum hold time.
+- `/dynamic_setup` shows whether new entries use dynamic AI trade setup.
+- `/dynamic_setup_on` requires an AI `buy` decision and stores per-trade size/exits.
+- `/dynamic_setup_off` uses static size and hard-exit settings for new entries.
 - `/notify_on` enables Telegram reports.
 - `/notify_off` mutes Telegram reports.
 - `/hermes <task>` runs the opt-in admin workspace operator.
@@ -163,10 +166,17 @@ activity. The AI writes three strict rules back into the active prompt and may t
 paper-mode runtime settings within app limits: entry score threshold, discovery poll
 cadence, paper trade size, exit review cadence, and next reflection wall-clock time.
 The launch threshold starts at 25/100 and scout threshold starts at 70/100. Both can
-be changed without restarting from Telegram. A positive AI score at or above the
-active strategy threshold can open a paper buy, even if the model's label is `skip`.
-Hard exits can close positions before AI exit analysis when take-profit, stop-loss,
-trailing-stop, or max-hold rules trigger. Invalid or out-of-range tuning output is ignored.
+be changed without restarting from Telegram.
+
+Dynamic setup is enabled by default. In this mode, a new paper entry needs both a
+positive score at or above the active threshold and an AI `buy` decision. The AI
+also returns a bounded per-trade setup: paper size, stop loss, take-profit targets,
+trailing stop, max hold, and rationale. That setup is stored with the trade so later
+hard exits use the original plan. `/dynamic_setup_off` restores the older static
+mode where threshold-qualified entries use the configured trade size and hard-exit
+settings. Hard exits can close positions before AI exit analysis when take-profit,
+stop-loss, trailing-stop, or max-hold rules trigger. Invalid or out-of-range tuning
+output is ignored.
 
 ## Tests
 

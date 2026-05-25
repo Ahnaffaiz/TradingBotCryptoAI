@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from ai_meme_bot.core.database import (
@@ -83,6 +85,12 @@ async def test_ai_trade_plan_persists_and_controls_hard_exit(tmp_path):
     assert "TP1 30" in _hard_exit_reason(
         trade, make_snapshot(price=1.35), settings, 1.35
     )
+    assert "stop loss" in _hard_exit_reason(
+        trade, make_snapshot(price=0.87), settings, 1.0
+    )
+    assert "trailing stop" in _hard_exit_reason(
+        trade, make_snapshot(price=1.2), settings, 1.3
+    )
 
 
 @pytest.mark.asyncio
@@ -110,6 +118,22 @@ async def test_strategy_settings_persist_over_startup_defaults(tmp_path):
     await database.set_strategy_settings(tuned)
 
     assert await database.get_strategy_settings(config.strategy_defaults) == tuned
+
+
+@pytest.mark.asyncio
+async def test_dynamic_setup_setting_persists(tmp_path):
+    config = make_config(tmp_path / "trades.db")
+    database = Database(config.db_path)
+    await database.init_db()
+    defaults = await database.get_strategy_settings(config.strategy_defaults)
+
+    await database.set_strategy_settings(
+        replace(defaults, dynamic_setup_enabled=False)
+    )
+
+    loaded = await database.get_strategy_settings(config.strategy_defaults)
+    assert defaults.dynamic_setup_enabled is True
+    assert loaded.dynamic_setup_enabled is False
 
 
 def test_hard_exit_rules_trigger_take_profit_and_stop_loss():

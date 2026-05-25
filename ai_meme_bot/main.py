@@ -63,10 +63,12 @@ async def run_discovery_loop(
             )
             await notifier.entry_analysis(snapshot, evaluation)
             threshold = _entry_threshold(settings, snapshot.strategy)
-            if (
-                evaluation.score > 0
-                and evaluation.score >= threshold
-            ):
+            threshold_approved = evaluation.score > 0 and evaluation.score >= threshold
+            dynamic_approved = (
+                not settings.dynamic_setup_enabled
+                or (evaluation.wants_buy and evaluation.trade_plan is not None)
+            )
+            if threshold_approved and dynamic_approved:
                 result = await _trigger_buy(tools, snapshot, evaluation)
                 if result.success:
                     await database.mark_analysis_bought(analysis_id, result.trade_id)

@@ -299,7 +299,7 @@ class TradingAIService:
                 raise ValueError("reflection must return exactly three rules")
             return StrategyReflection(
                 rules=ReflectionRules(normalized),
-                settings=_validated_settings(payload.get("settings")),
+                settings=_validated_settings(payload.get("settings"), current_settings),
                 settings_rationale=str(payload.get("settings_rationale", "")).strip(),
             )
         except Exception as exc:
@@ -353,7 +353,9 @@ def _trade_prompt_payload(trade: TradeRecord) -> Dict[str, Any]:
     }
 
 
-def _validated_settings(payload: Any) -> Optional[StrategySettings]:
+def _validated_settings(
+    payload: Any, current_settings: Optional[StrategySettings] = None
+) -> Optional[StrategySettings]:
     """Reject settings unless every paper guardrail is satisfied."""
 
     if not isinstance(payload, dict):
@@ -422,6 +424,11 @@ def _validated_settings(payload: Any) -> Optional[StrategySettings]:
         max_hold_seconds,
         scout_min_liquidity_usd,
         scout_min_volume_5m_usd,
+        (
+            current_settings.dynamic_setup_enabled
+            if current_settings is not None
+            else True
+        ),
     )
 
 

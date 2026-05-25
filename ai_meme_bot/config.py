@@ -236,4 +236,5 @@ class AppConfig:
             max_hold_seconds=self.max_hold_seconds,
             scout_min_liquidity_usd=self.scout_min_liquidity_usd,
             scout_min_volume_5m_usd=self.scout_min_volume_5m_usd,
+            dynamic_setup_enabled=True,
         )
