@@ -2,7 +2,13 @@ import pytest
 
 from ai_meme_bot.agent.hermes_bot import TelegramPaperNotifier, TelegramTradingBot
 from ai_meme_bot.core.database import Database
-from ai_meme_bot.models import StrategySettings, TokenEvaluation, TradeResult
+from ai_meme_bot.models import (
+    ExitDecision,
+    StrategySettings,
+    TokenEvaluation,
+    TradeRecord,
+    TradeResult,
+)
 from tests.helpers import make_config, make_snapshot
 
 
@@ -62,6 +68,10 @@ async def test_status_redacts_api_key_and_auto_handlers_toggle_state(tmp_path):
     assert "Auto entries:</b> 🟢 ON" in status
     assert "Reports:</b> 🔔 ON in this chat" in status
     assert "Thresholds:</b> launch ≥ 25 | scout ≥ 70" in status
+    assert (
+        "Trade size:</b> static 1.000000 SOL | dynamic 0.010000..2.000000 SOL"
+        in status
+    )
     assert await database.get_auto_trading() is False
     assert await database.get_notification_chat_id() == 94721
     assert "Auto entries enabled" in update.effective_message.replies[0][0]
@@ -104,9 +114,30 @@ async def test_dynamic_setup_commands_toggle_strategy_settings(tmp_path):
     enabled = await database.get_strategy_settings(config.strategy_defaults)
 
     assert "Dynamic setup:</b> ON" in update.effective_message.replies[0][0]
+    assert "AI size:</b> 0.01..2 SOL" in update.effective_message.replies[0][0]
     assert "Dynamic setup updated" in update.effective_message.replies[1][0]
     assert disabled.dynamic_setup_enabled is False
     assert enabled.dynamic_setup_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_trade_size_bound_commands_update_strategy_settings(tmp_path):
+    config = make_config(tmp_path / "trades.db")
+    database = Database(config.db_path)
+    await database.init_db()
+    bot = TelegramTradingBot(config, database)
+    update = FakeUpdate()
+
+    await bot.min_trade_size(update, FakeContext(["0.05"]))
+    await bot.max_trade_size(update, FakeContext(["0.25"]))
+    settings = await database.get_strategy_settings(config.strategy_defaults)
+    await bot.min_trade_size(update, FakeContext(["0.3"]))
+
+    assert settings.min_trade_amount_sol == 0.05
+    assert settings.max_trade_amount_sol == 0.25
+    assert "Minimum trade size updated" in update.effective_message.replies[0][0]
+    assert "Maximum trade size updated" in update.effective_message.replies[1][0]
+    assert "Invalid range" in update.effective_message.replies[2][0]
 
 
 @pytest.mark.asyncio
@@ -124,14 +155,46 @@ async def test_telegram_notifier_sends_analysis_and_trade_reports(tmp_path):
     await notifier.buy_result(
         snapshot,
         evaluation,
-        TradeResult(True, "Opened paper trade.", trade_id=9),
+        TradeResult(True, "Opened paper trade.", trade_id=9, entry_amount_sol=0.25),
     )
 
     assert [chat_id for chat_id, _text, _kwargs in telegram_bot.messages] == [1234, 1234]
     assert "Paper Entry Analysis" in telegram_bot.messages[0][1]
     assert "liquid enough" in telegram_bot.messages[0][1]
     assert "Paper Buy Opened" in telegram_bot.messages[1][1]
+    assert "Entry size:</b> 0.250000 SOL" in telegram_bot.messages[1][1]
     assert telegram_bot.messages[0][2]["parse_mode"] == "HTML"
+
+
+def test_sell_result_displays_entry_size():
+    trade = TradeRecord(
+        id=4,
+        token_address="mint-1",
+        buy_price=1.0,
+        sell_price=None,
+        pnl=None,
+        status="OPEN",
+        timestamp="2026-05-22T00:00:00+00:00",
+        entry_amount_sol=0.25,
+        token_quantity=0.25,
+        entry_snapshot_json="{}",
+        trade_plan_json="{}",
+        exit_snapshot_json=None,
+        exit_reason=None,
+        opened_at="2026-05-22T00:00:00+00:00",
+        closed_at=None,
+    )
+
+    from ai_meme_bot.agent.hermes_bot import format_sell_result
+
+    rendered = format_sell_result(
+        trade,
+        make_snapshot(price=1.2),
+        ExitDecision("close", "take profit"),
+        TradeResult(True, "Closed paper trade.", trade_id=4, pnl=0.05),
+    )
+
+    assert "Entry size:</b> 0.250000 SOL" in rendered
 
 
 @pytest.mark.asyncio

@@ -538,6 +538,16 @@ class Database:
                     stored.get("dynamic_setup_enabled"),
                     defaults.dynamic_setup_enabled,
                 ),
+                min_trade_amount_sol=float(
+                    stored.get(
+                        "min_trade_amount_sol", defaults.min_trade_amount_sol
+                    )
+                ),
+                max_trade_amount_sol=float(
+                    stored.get(
+                        "max_trade_amount_sol", defaults.max_trade_amount_sol
+                    )
+                ),
             )
         except (TypeError, ValueError):
             return defaults

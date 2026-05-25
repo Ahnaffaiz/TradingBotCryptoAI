@@ -133,7 +133,7 @@ class TradingAIService:
         """Return a validated entry review or a safe skip."""
 
         active_settings = settings or StrategySettings(25, 30.0, 0.1, 45.0, "00:00")
-        max_entry_size = min(2.0, max(active_settings.base_trade_amount * 3.0, 0.01))
+        min_entry_size, max_entry_size = active_settings.trade_size_bounds()
         prompt = {
             "task": "Evaluate whether a paper trader may buy this PumpSwap candidate.",
             "strategy": (
@@ -147,8 +147,8 @@ class TradingAIService:
             "latest_rules": rules or "No learned rules yet.",
             "current_settings": active_settings.prompt_payload(),
             "risk_plan_guardrails": {
-                "position_size_sol": "number 0.01..{0:g}; use smaller size for weak, illiquid, concentrated, or extended setups".format(
-                    max_entry_size
+                "position_size_sol": "number {0:g}..{1:g}; use smaller size for weak, illiquid, concentrated, or extended setups".format(
+                    min_entry_size, max_entry_size
                 ),
                 "stop_loss_pct": "number 1..50",
                 "take_profit_targets_pct": (
@@ -272,6 +272,8 @@ class TradingAIService:
                     "stop_loss_pct": "number 1..50",
                     "trailing_stop_pct": "number 0..50",
                     "max_hold_seconds": "number 60..86400",
+                    "min_trade_amount_sol": "number 0.01..2.0",
+                    "max_trade_amount_sol": "number 0.01..2.0",
                     "scout_min_liquidity_usd": "number 1000..1000000",
                     "scout_min_volume_5m_usd": "number 0..1000000",
                     "reflection_time": "HH:MM 24-hour wall clock",
@@ -373,6 +375,22 @@ def _validated_settings(
         stop_loss_pct = float(payload.get("stop_loss_pct", 8.0))
         trailing_stop_pct = float(payload.get("trailing_stop_pct", 7.0))
         max_hold_seconds = float(payload.get("max_hold_seconds", 3600.0))
+        min_trade_amount_sol = float(
+            payload.get(
+                "min_trade_amount_sol",
+                current_settings.min_trade_amount_sol
+                if current_settings is not None
+                else 0.01,
+            )
+        )
+        max_trade_amount_sol = float(
+            payload.get(
+                "max_trade_amount_sol",
+                current_settings.max_trade_amount_sol
+                if current_settings is not None
+                else min(2.0, max(trade_amount * 3.0, 0.01)),
+            )
+        )
         scout_min_liquidity_usd = float(
             payload.get("scout_min_liquidity_usd", 15000.0)
         )
@@ -391,6 +409,12 @@ def _validated_settings(
     if not 10 <= tracker_poll <= 300:
         return None
     if not 0.01 <= trade_amount <= 2.0:
+        return None
+    if not 0.01 <= min_trade_amount_sol <= 2.0:
+        return None
+    if not 0.01 <= max_trade_amount_sol <= 2.0:
+        return None
+    if min_trade_amount_sol > max_trade_amount_sol:
         return None
     if not 15 <= review_seconds <= 300:
         return None
@@ -429,6 +453,8 @@ def _validated_settings(
             if current_settings is not None
             else True
         ),
+        min_trade_amount_sol,
+        max_trade_amount_sol,
     )
 
 
@@ -444,11 +470,11 @@ def _validated_trade_plan(
     raw_plan = payload.get("trade_plan")
     plan = raw_plan if isinstance(raw_plan, dict) else payload
     inferred = _inferred_trade_plan(settings, score, snapshot, fallback_rationale)
-    max_entry_size = min(2.0, max(settings.base_trade_amount * 3.0, 0.01))
+    min_entry_size, max_entry_size = settings.trade_size_bounds()
 
     amount = _bounded_float(
         plan.get("position_size_sol", plan.get("entry_amount_sol")),
-        0.01,
+        min_entry_size,
         max_entry_size,
         inferred.entry_amount_sol,
     )
@@ -500,7 +526,8 @@ def _inferred_trade_plan(
         * liquidity_factor
         * momentum_factor
     )
-    amount = round(max(0.01, min(amount, settings.base_trade_amount * 2.0, 2.0)), 6)
+    min_entry_size, max_entry_size = settings.trade_size_bounds()
+    amount = round(max(min_entry_size, min(amount, max_entry_size)), 6)
     first_target = max(3.0, settings.take_profit_pct * (0.85 + confidence * 0.5))
     second_target = max(first_target + 1.0, first_target * 1.8)
     stop_loss = max(

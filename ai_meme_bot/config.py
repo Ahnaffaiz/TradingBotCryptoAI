@@ -94,6 +94,8 @@ class AppConfig:
     scout_min_volume_5m_usd: float
     reflection_time: str
     reflection_timezone: str
+    min_trade_amount_sol: float = 0.01
+    max_trade_amount_sol: float = 2.0
 
     @classmethod
     def from_env(
@@ -111,6 +113,18 @@ class AppConfig:
         base_trade_amount = _float_env("BASE_TRADE_AMOUNT", 0.1)
         if base_trade_amount <= 0:
             raise ConfigError("BASE_TRADE_AMOUNT must be greater than zero.")
+        min_trade_amount_sol = _float_env("MIN_TRADE_AMOUNT_SOL", 0.01)
+        max_trade_amount_sol = _float_env(
+            "MAX_TRADE_AMOUNT_SOL", min(2.0, max(base_trade_amount * 3.0, 0.01))
+        )
+        if min_trade_amount_sol < 0.01 or min_trade_amount_sol > 2.0:
+            raise ConfigError("MIN_TRADE_AMOUNT_SOL must be between 0.01 and 2.0.")
+        if max_trade_amount_sol < 0.01 or max_trade_amount_sol > 2.0:
+            raise ConfigError("MAX_TRADE_AMOUNT_SOL must be between 0.01 and 2.0.")
+        if min_trade_amount_sol > max_trade_amount_sol:
+            raise ConfigError(
+                "MIN_TRADE_AMOUNT_SOL must be less than or equal to MAX_TRADE_AMOUNT_SOL."
+            )
 
         provider = os.getenv("AI_PROVIDER", "custom").strip().lower()
         base_url = os.getenv("AI_BASE_URL", "").strip()
@@ -208,6 +222,8 @@ class AppConfig:
             scout_min_volume_5m_usd=_float_env("SCOUT_MIN_VOLUME_5M_USD", 500.0),
             reflection_time=os.getenv("REFLECTION_TIME", "00:00").strip(),
             reflection_timezone=os.getenv("REFLECTION_TIMEZONE", "Asia/Jakarta").strip(),
+            min_trade_amount_sol=min_trade_amount_sol,
+            max_trade_amount_sol=max_trade_amount_sol,
         )
 
     @property
@@ -237,4 +253,6 @@ class AppConfig:
             scout_min_liquidity_usd=self.scout_min_liquidity_usd,
             scout_min_volume_5m_usd=self.scout_min_volume_5m_usd,
             dynamic_setup_enabled=True,
+            min_trade_amount_sol=self.min_trade_amount_sol,
+            max_trade_amount_sol=self.max_trade_amount_sol,
         )

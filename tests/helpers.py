@@ -40,6 +40,8 @@ def make_config(db_path: Path, **overrides) -> AppConfig:
         "scout_min_volume_5m_usd": 500.0,
         "reflection_time": "00:00",
         "reflection_timezone": "UTC",
+        "min_trade_amount_sol": 0.01,
+        "max_trade_amount_sol": 2.0,
     }
     values.update(overrides)
     return AppConfig(**values)

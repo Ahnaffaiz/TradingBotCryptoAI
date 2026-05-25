@@ -8,8 +8,9 @@ from ai_meme_bot.core.database import (
     InsufficientBalanceError,
 )
 from ai_meme_bot.core.execution import TradeExecutor
+from ai_meme_bot.agent.tools import TradingTools
 from ai_meme_bot.main import _hard_exit_reason
-from ai_meme_bot.models import StrategySettings, TokenEvaluation
+from ai_meme_bot.models import StrategySettings, TokenEvaluation, TradePlan
 from tests.helpers import make_config, make_snapshot
 
 
@@ -134,6 +135,42 @@ async def test_dynamic_setup_setting_persists(tmp_path):
     loaded = await database.get_strategy_settings(config.strategy_defaults)
     assert defaults.dynamic_setup_enabled is True
     assert loaded.dynamic_setup_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_dynamic_buy_size_is_clamped_to_strategy_range(tmp_path):
+    config = make_config(tmp_path / "trades.db")
+    database = Database(config.db_path)
+    await database.init_db()
+    settings = await database.get_strategy_settings(config.strategy_defaults)
+    await database.set_strategy_settings(
+        replace(settings, min_trade_amount_sol=0.05, max_trade_amount_sol=0.2)
+    )
+    tools = TradingTools(
+        config,
+        database,
+        tracker=object(),
+        executor=TradeExecutor(config, database),
+    )
+    evaluation = TokenEvaluation(
+        score=90,
+        decision="buy",
+        rationale="strong",
+        trade_plan=TradePlan(
+            entry_amount_sol=0.5,
+            stop_loss_pct=8.0,
+            take_profit_targets_pct=[18.0],
+            trailing_stop_pct=7.0,
+            max_hold_seconds=3600.0,
+        ),
+    )
+
+    result = await tools.trigger_buy("mint-1", make_snapshot(), evaluation)
+    trade = await database.get_trade(result.trade_id)
+
+    assert result.success is True
+    assert result.entry_amount_sol == pytest.approx(0.2)
+    assert trade.entry_amount_sol == pytest.approx(0.2)
 
 
 def test_hard_exit_rules_trigger_take_profit_and_stop_loss():

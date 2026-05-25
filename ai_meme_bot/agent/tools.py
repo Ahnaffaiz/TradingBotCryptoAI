@@ -58,7 +58,18 @@ class TradingTools:
         balance = await self.database.get_balance()
         if balance <= 0:
             return TradeResult(False, "Dummy balance is insufficient.")
-        entry_amount = min(entry_amount, balance)
+        if plan is not None:
+            min_size, max_size = settings.trade_size_bounds()
+            bounded_amount = max(min_size, min(entry_amount, max_size))
+            if balance < min_size:
+                return TradeResult(
+                    False,
+                    "Dummy balance is below the minimum dynamic trade size.",
+                    entry_amount_sol=entry_amount,
+                )
+            entry_amount = min(bounded_amount, balance)
+        else:
+            entry_amount = min(entry_amount, balance)
         if plan is not None and entry_amount != plan.entry_amount_sol:
             plan = TradePlan(
                 entry_amount_sol=entry_amount,
@@ -66,7 +77,7 @@ class TradingTools:
                 take_profit_targets_pct=plan.take_profit_targets_pct[:],
                 trailing_stop_pct=plan.trailing_stop_pct,
                 max_hold_seconds=plan.max_hold_seconds,
-                rationale="{0} Size capped by available paper balance.".format(
+                rationale="{0} Size adjusted to dynamic range or available paper balance.".format(
                     plan.rationale
                 ).strip(),
             )

@@ -85,7 +85,13 @@ class TradeExecutor:
             )
         except DatabaseError as exc:
             return TradeResult(False, str(exc), trade_id=trade.id)
-        return TradeResult(True, "Closed paper trade.", trade_id=trade.id, pnl=pnl)
+        return TradeResult(
+            True,
+            "Closed paper trade.",
+            trade_id=trade.id,
+            pnl=pnl,
+            entry_amount_sol=trade.entry_amount_sol,
+        )
 
     async def _paper_buy(
         self,
@@ -110,7 +116,12 @@ class TradeExecutor:
             )
         except (InsufficientBalanceError, DuplicateOpenTradeError):
             raise
-        return TradeResult(True, "Opened paper trade.", trade_id=trade_id)
+        return TradeResult(
+            True,
+            "Opened paper trade.",
+            trade_id=trade_id,
+            entry_amount_sol=amount_sol,
+        )
 
     async def _paper_close_by_token(
         self, token_address: str, snapshot: TokenSnapshot, reason: str

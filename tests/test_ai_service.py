@@ -72,7 +72,14 @@ async def test_entry_accepts_bounded_ai_trade_plan():
     evaluation = await service.evaluate_entry(
         make_snapshot(),
         "",
-        StrategySettings(25, 30.0, 0.5, 45.0, "00:00"),
+        StrategySettings(
+            25,
+            30.0,
+            0.5,
+            45.0,
+            "00:00",
+            max_trade_amount_sol=1.5,
+        ),
     )
 
     assert evaluation.trade_plan.entry_amount_sol == 1.5
@@ -90,7 +97,14 @@ async def test_entry_infers_missing_dynamic_trade_plan():
     evaluation = await service.evaluate_entry(
         make_snapshot(),
         "",
-        StrategySettings(25, 30.0, 0.5, 45.0, "00:00"),
+        StrategySettings(
+            25,
+            30.0,
+            0.5,
+            45.0,
+            "00:00",
+            max_trade_amount_sol=1.5,
+        ),
     )
 
     assert evaluation.wants_buy is True

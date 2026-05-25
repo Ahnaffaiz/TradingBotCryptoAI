@@ -79,6 +79,7 @@ async def run_discovery_loop(
                     {
                         "analysis_id": analysis_id,
                         "trade_id": result.trade_id,
+                        "entry_amount_sol": result.entry_amount_sol,
                         "strategy": snapshot.strategy,
                         "threshold": threshold,
                     },

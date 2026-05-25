@@ -216,6 +216,10 @@ class TelegramTradingBot:
         application.add_handler(CommandHandler("scout_off", self.scout_off))
         application.add_handler(CommandHandler("launch_threshold", self.launch_threshold))
         application.add_handler(CommandHandler("scout_threshold", self.scout_threshold))
+        application.add_handler(CommandHandler("min_trade_size", self.min_trade_size))
+        application.add_handler(CommandHandler("max_trade_size", self.max_trade_size))
+        application.add_handler(CommandHandler("min_size", self.min_trade_size))
+        application.add_handler(CommandHandler("max_size", self.max_trade_size))
         application.add_handler(CommandHandler("take_profit", self.take_profit))
         application.add_handler(CommandHandler("stop_loss", self.stop_loss))
         application.add_handler(CommandHandler("trailing_stop", self.trailing_stop))
@@ -487,6 +491,28 @@ class TelegramTradingBot:
 
         await self._toggle_strategy(update, "scout_enabled", "Scout mode", False)
 
+    async def min_trade_size(self, update: Any, context: Any) -> None:
+        """Set minimum dynamic trade size."""
+
+        await self._update_trade_size_bound(
+            update,
+            context,
+            "min_trade_amount_sol",
+            "Minimum trade size",
+            is_minimum=True,
+        )
+
+    async def max_trade_size(self, update: Any, context: Any) -> None:
+        """Set maximum dynamic trade size."""
+
+        await self._update_trade_size_bound(
+            update,
+            context,
+            "max_trade_amount_sol",
+            "Maximum trade size",
+            is_minimum=False,
+        )
+
     async def take_profit(self, update: Any, context: Any) -> None:
         """Set hard take-profit percentage."""
 
@@ -549,14 +575,16 @@ class TelegramTradingBot:
         settings = await self.database.get_strategy_settings(
             self.config.strategy_defaults
         )
-        max_entry_size = min(2.0, max(settings.base_trade_amount * 3.0, 0.01))
+        min_entry_size, max_entry_size = settings.trade_size_bounds()
         await _reply(
             update,
             "🧠 <b>Dynamic setup:</b> {0}\n"
-            "📦 <b>AI size:</b> 0.01..{1:g} SOL\n"
+            "📦 <b>AI size:</b> {1:g}..{2:g} SOL\n"
             "🛡 <b>AI exits:</b> SL 1..50% | TP 3..500% | trail 0..50% | max 60s..1d\n"
-            "Use <code>/dynamic_setup_on</code> or <code>/dynamic_setup_off</code>.".format(
+            "Use <code>/min_trade_size</code>, <code>/max_trade_size</code>, "
+            "<code>/dynamic_setup_on</code>, or <code>/dynamic_setup_off</code>.".format(
                 "ON" if settings.dynamic_setup_enabled else "OFF",
+                min_entry_size,
                 max_entry_size,
             ),
             reply_markup=menu_markup(),
@@ -676,7 +704,11 @@ class TelegramTradingBot:
                 "ON" if settings.launch_enabled else "OFF",
                 "ON" if settings.scout_enabled else "OFF",
             ),
-            "📦 <b>Trade size:</b> {0:.6f} SOL".format(settings.base_trade_amount),
+            "📦 <b>Trade size:</b> static {0:.6f} SOL | dynamic {1:.6f}..{2:.6f} SOL".format(
+                settings.base_trade_amount,
+                settings.min_trade_amount_sol,
+                settings.max_trade_amount_sol,
+            ),
             "🧠 <b>Setup:</b> {0}".format(
                 "dynamic AI per trade"
                 if settings.dynamic_setup_enabled
@@ -895,6 +927,8 @@ class TelegramTradingBot:
                     BotCommand("scout_off", "disable scout scanner"),
                     BotCommand("threshold", "set launch buy score threshold"),
                     BotCommand("scout_threshold", "set scout buy score threshold"),
+                    BotCommand("min_trade_size", "set minimum dynamic trade size"),
+                    BotCommand("max_trade_size", "set maximum dynamic trade size"),
                     BotCommand("take_profit", "set hard take profit percent"),
                     BotCommand("stop_loss", "set hard stop loss percent"),
                     BotCommand("trailing_stop", "set trailing stop percent"),
@@ -1006,6 +1040,69 @@ class TelegramTradingBot:
             replace(settings, **{field_name: value}),
             label,
             "{0:g}{1}".format(value, suffix),
+        )
+
+    async def _update_trade_size_bound(
+        self,
+        update: Any,
+        context: Any,
+        field_name: str,
+        label: str,
+        is_minimum: bool,
+    ) -> None:
+        await self._register_notification_chat(update)
+        settings = await self.database.get_strategy_settings(
+            self.config.strategy_defaults
+        )
+        raw_value = _context_text(context)
+        current_value = getattr(settings, field_name)
+        if not raw_value:
+            await _reply(
+                update,
+                "📦 <b>{0}:</b> {1:g} SOL\n"
+                "Dynamic AI size range is <code>{2:g}..{3:g} SOL</code>.".format(
+                    _html(label),
+                    current_value,
+                    settings.min_trade_amount_sol,
+                    settings.max_trade_amount_sol,
+                ),
+                reply_markup=menu_markup(),
+            )
+            return
+        value = _parse_float(raw_value)
+        if value is None or value < 0.01 or value > 2.0:
+            await _reply(
+                update,
+                "⚠️ <b>Invalid {0}</b>\nSend a number from <code>0.01</code> "
+                "to <code>2</code> SOL.".format(_html(label.lower())),
+                reply_markup=menu_markup(),
+            )
+            return
+        if is_minimum and value > settings.max_trade_amount_sol:
+            await _reply(
+                update,
+                "⚠️ <b>Invalid range</b>\nMinimum trade size cannot be above "
+                "the current maximum of <code>{0:g} SOL</code>.".format(
+                    settings.max_trade_amount_sol
+                ),
+                reply_markup=menu_markup(),
+            )
+            return
+        if not is_minimum and value < settings.min_trade_amount_sol:
+            await _reply(
+                update,
+                "⚠️ <b>Invalid range</b>\nMaximum trade size cannot be below "
+                "the current minimum of <code>{0:g} SOL</code>.".format(
+                    settings.min_trade_amount_sol
+                ),
+                reply_markup=menu_markup(),
+            )
+            return
+        await self._store_settings(
+            update,
+            replace(settings, **{field_name: value}),
+            label,
+            "{0:g} SOL".format(value),
         )
 
     async def _store_settings(
@@ -1168,6 +1265,16 @@ def format_buy_result(
 ) -> str:
     """Format a paper buy success or rejection."""
 
+    planned_size = (
+        evaluation.trade_plan.entry_amount_sol
+        if evaluation.trade_plan is not None
+        else None
+    )
+    actual_size = (
+        result.entry_amount_sol
+        if result.entry_amount_sol is not None
+        else planned_size
+    )
     return "\n".join(
         [
             "{0} <b>Paper Buy {1}</b>".format(
@@ -1180,10 +1287,17 @@ def format_buy_result(
             ),
             "🧠 <b>AI score:</b> {0}/100".format(evaluation.score),
             "🎯 <b>Strategy:</b> {0}".format(_html(snapshot.strategy.upper())),
-            "📦 <b>AI size:</b> {0}".format(
-                "{0:.6f} SOL".format(evaluation.trade_plan.entry_amount_sol)
-                if evaluation.trade_plan
+            "📦 <b>Entry size:</b> {0}".format(
+                "{0:.6f} SOL".format(actual_size)
+                if actual_size is not None
                 else "default"
+            ),
+            "🧮 <b>AI requested:</b> {0}".format(
+                "{0:.6f} SOL".format(planned_size)
+                if planned_size is not None and planned_size != actual_size
+                else "same as entry"
+                if planned_size is not None
+                else "static settings"
             ),
             "🧠 <b>Setup mode:</b> {0}".format(
                 "dynamic AI" if evaluation.trade_plan else "static settings"
@@ -1229,6 +1343,7 @@ def format_sell_result(
             ),
             "🧾 <b>Trade:</b> #{0}".format(trade.id),
             "🪙 <b>Token:</b> <code>{0}</code>".format(_html(snapshot.token_address)),
+            "📦 <b>Entry size:</b> {0:.6f} SOL".format(trade.entry_amount_sol),
             "📝 <b>Exit reason:</b> {0}".format(
                 _html(decision.rationale or "AI close")
             ),

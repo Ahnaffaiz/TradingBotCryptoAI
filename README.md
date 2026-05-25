@@ -65,6 +65,8 @@ Telegram commands:
 - `/threshold <0-100>` changes the launch buy score threshold, for example `/threshold 25`.
 - `/launch_threshold <0-100>` changes the launch-mode buy threshold.
 - `/scout_threshold <0-100>` changes the scout-mode buy threshold.
+- `/min_trade_size <SOL>` and `/max_trade_size <SOL>` set the dynamic AI
+  position-size range.
 - `/take_profit <pct>` sets the hard take-profit exit.
 - `/stop_loss <pct>` sets the hard stop-loss exit.
 - `/trailing_stop <pct>` sets the hard trailing-stop exit; `0` disables it.
@@ -113,6 +115,8 @@ See [`ai_meme_bot/.env.example`](ai_meme_bot/.env.example). Important defaults:
 - `STOP_LOSS_PCT=8`
 - `TRAILING_STOP_PCT=7`
 - `MAX_HOLD_SECONDS=3600`
+- `MIN_TRADE_AMOUNT_SOL=0.01`
+- `MAX_TRADE_AMOUNT_SOL=0.3`
 - `SCOUT_MIN_LIQUIDITY_USD=15000`
 - `SCOUT_MIN_VOLUME_5M_USD=500`
 

@@ -148,9 +148,18 @@ class StrategySettings:
     scout_min_liquidity_usd: float = 15000.0
     scout_min_volume_5m_usd: float = 500.0
     dynamic_setup_enabled: bool = True
+    min_trade_amount_sol: float = 0.01
+    max_trade_amount_sol: float = 2.0
 
     def prompt_payload(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def trade_size_bounds(self) -> tuple[float, float]:
+        """Return normalized dynamic trade size bounds."""
+
+        minimum = max(0.01, float(self.min_trade_amount_sol))
+        maximum = max(minimum, min(2.0, float(self.max_trade_amount_sol)))
+        return minimum, maximum
 
 
 @dataclass
@@ -229,3 +238,4 @@ class TradeResult:
     message: str
     trade_id: Optional[int] = None
     pnl: Optional[float] = None
+    entry_amount_sol: Optional[float] = None
