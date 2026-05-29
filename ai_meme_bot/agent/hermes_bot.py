@@ -57,6 +57,15 @@ class PaperNotifier(Protocol):
     ) -> None:
         """Report an open paper position review."""
 
+    async def buy_more_result(
+        self,
+        trade: TradeRecord,
+        snapshot: TokenSnapshot,
+        decision: ExitDecision,
+        result: TradeResult,
+    ) -> None:
+        """Report a paper add-on buy outcome."""
+
     async def sell_result(
         self,
         trade: TradeRecord,
@@ -91,6 +100,15 @@ class NullPaperNotifier:
     ) -> None:
         return None
 
+    async def buy_more_result(
+        self,
+        trade: TradeRecord,
+        snapshot: TokenSnapshot,
+        decision: ExitDecision,
+        result: TradeResult,
+    ) -> None:
+        return None
+
     async def sell_result(
         self,
         trade: TradeRecord,
@@ -117,7 +135,10 @@ class TelegramPaperNotifier:
     async def entry_analysis(
         self, snapshot: TokenSnapshot, evaluation: TokenEvaluation
     ) -> None:
-        await self._send(format_entry_analysis(snapshot, evaluation))
+        await self._send(
+            format_entry_analysis(snapshot, evaluation),
+            photo_url=snapshot.token_logo_url,
+        )
 
     async def buy_result(
         self, snapshot: TokenSnapshot, evaluation: TokenEvaluation, result: TradeResult
@@ -127,7 +148,19 @@ class TelegramPaperNotifier:
     async def exit_analysis(
         self, trade: TradeRecord, snapshot: TokenSnapshot, decision: ExitDecision
     ) -> None:
-        await self._send(format_exit_analysis(trade, snapshot, decision))
+        await self._send(
+            format_exit_analysis(trade, snapshot, decision),
+            photo_url=snapshot.token_logo_url,
+        )
+
+    async def buy_more_result(
+        self,
+        trade: TradeRecord,
+        snapshot: TokenSnapshot,
+        decision: ExitDecision,
+        result: TradeResult,
+    ) -> None:
+        await self._send(format_buy_more_result(trade, snapshot, decision, result))
 
     async def sell_result(
         self,
@@ -145,10 +178,27 @@ class TelegramPaperNotifier:
     async def error(self, stage: str, detail: str) -> None:
         await self._send(format_error(stage, detail))
 
-    async def _send(self, text: str) -> None:
+    async def _send(self, text: str, photo_url: Optional[str] = None) -> None:
         chat_id = await self.database.get_notification_chat_id()
         if chat_id is None or not await self.database.get_notifications_enabled():
             return
+        if photo_url:
+            try:
+                await self.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=photo_url,
+                    caption=text[:1000],
+                    parse_mode=PARSE_MODE,
+                )
+                if len(text) > 1000:
+                    await self.bot.send_message(
+                        chat_id=chat_id,
+                        text=text[:4000],
+                        parse_mode=PARSE_MODE,
+                    )
+                return
+            except Exception as exc:
+                LOGGER.warning("Telegram photo notification failed: %s", exc)
         try:
             await self.bot.send_message(
                 chat_id=chat_id,
@@ -183,6 +233,7 @@ class TelegramTradingBot:
             raise ValueError("TELEGRAM_BOT_TOKEN is required to start Telegram polling.")
         from telegram.ext import (
             ApplicationBuilder,
+            CallbackQueryHandler,
             CommandHandler,
             MessageHandler,
             filters,
@@ -220,6 +271,7 @@ class TelegramTradingBot:
         application.add_handler(CommandHandler("max_trade_size", self.max_trade_size))
         application.add_handler(CommandHandler("min_size", self.min_trade_size))
         application.add_handler(CommandHandler("max_size", self.max_trade_size))
+        application.add_handler(CommandHandler("size_range", self.size_range))
         application.add_handler(CommandHandler("take_profit", self.take_profit))
         application.add_handler(CommandHandler("stop_loss", self.stop_loss))
         application.add_handler(CommandHandler("trailing_stop", self.trailing_stop))
@@ -230,6 +282,7 @@ class TelegramTradingBot:
         application.add_handler(CommandHandler("notify_on", self.notify_on))
         application.add_handler(CommandHandler("notify_off", self.notify_off))
         application.add_handler(CommandHandler("hermes", self.hermes))
+        application.add_handler(CallbackQueryHandler(self.button, pattern=r"^bot:"))
         application.add_handler(
             MessageHandler(filters.Regex("^{0}$".format(MENU_STATUS)), self.status)
         )
@@ -272,6 +325,123 @@ class TelegramTradingBot:
             )
         )
         return application
+
+    async def button(self, update: Any, _context: Any) -> None:
+        """Handle inline menu button taps."""
+
+        query = getattr(update, "callback_query", None)
+        if query is None:
+            return
+        try:
+            await query.answer()
+        except Exception:
+            pass
+        data = str(getattr(query, "data", "") or "")
+        await self._register_notification_chat(update)
+
+        if data == "bot:menu":
+            await _respond(update, menu_text(), reply_markup=menu_markup())
+            return
+        if data == "bot:status":
+            await self.status(update, None)
+            return
+        if data == "bot:history":
+            trades = await self.database.get_trade_history(limit=50)
+            await _respond(
+                update, format_trade_history(trades), reply_markup=history_menu_markup()
+            )
+            return
+        if data == "bot:history:all":
+            trades = await self.database.get_trade_history(limit=None)
+            await _respond(
+                update, format_trade_history(trades), reply_markup=history_menu_markup()
+            )
+            return
+        if data == "bot:positions":
+            await _respond(
+                update,
+                await self.render_positions_menu(),
+                reply_markup=position_menu_markup(await self.database.get_open_trades()),
+            )
+            return
+        if data.startswith("bot:position:"):
+            trade_id = _parse_callback_int(data, "bot:position:")
+            if trade_id is not None:
+                text = await self.render_position_detail(trade_id)
+                trade = await self.database.get_trade(trade_id)
+                await _respond(
+                    update,
+                    text,
+                    reply_markup=position_action_markup(trade) if trade else menu_markup(),
+                )
+            return
+        if data in {"bot:tp:", "bot:sl:", "bot:close:"}:
+            return
+        if data.startswith("bot:tp:"):
+            await self._manual_close_by_callback(update, data, "bot:tp:", "manual take profit")
+            return
+        if data.startswith("bot:sl:"):
+            await self._manual_close_by_callback(update, data, "bot:sl:", "manual cut loss")
+            return
+        if data.startswith("bot:close:"):
+            await self._manual_close_by_callback(update, data, "bot:close:", "manual close")
+            return
+        if data == "bot:trading":
+            await _respond(
+                update,
+                await self.render_trading_menu(),
+                reply_markup=trading_menu_markup(
+                    await self.database.get_strategy_settings(self.config.strategy_defaults)
+                ),
+            )
+            return
+        if data == "bot:settings":
+            await _respond(
+                update,
+                await self.render_settings_menu(),
+                reply_markup=settings_menu_markup(
+                    await self.database.get_strategy_settings(self.config.strategy_defaults)
+                ),
+            )
+            return
+        if data == "bot:size":
+            settings = await self.database.get_strategy_settings(self.config.strategy_defaults)
+            await _respond(
+                update,
+                _size_menu_text(settings),
+                reply_markup=size_menu_markup(settings),
+            )
+            return
+        if data == "bot:exits":
+            settings = await self.database.get_strategy_settings(self.config.strategy_defaults)
+            await _respond(
+                update,
+                _exit_menu_text(settings),
+                reply_markup=size_menu_markup(settings),
+            )
+            return
+        if data == "bot:risk":
+            settings = await self.database.get_strategy_settings(self.config.strategy_defaults)
+            await _respond(
+                update,
+                _risk_menu_text(settings),
+                reply_markup=risk_menu_markup(settings),
+            )
+            return
+        if data == "bot:reports":
+            await _respond(
+                update,
+                await self.render_reports_menu(),
+                reply_markup=reports_menu_markup(
+                    await self.database.get_notifications_enabled()
+                ),
+            )
+            return
+
+        handled = await self._handle_setting_button(update, data)
+        if handled:
+            return
+        await _respond(update, menu_text(), reply_markup=menu_markup())
 
     async def start(self, update: Any, _context: Any) -> None:
         """Explain the paper-first bot control surface."""
@@ -330,9 +500,8 @@ class TelegramTradingBot:
         if limit is None and raw_value.strip().lower() != "all":
             await _reply(
                 update,
-                "⚠️ <b>Invalid history limit</b>\nUse <code>/history</code>, "
-                "<code>/history all</code>, or <code>/history 20</code>.",
-                reply_markup=menu_markup(),
+                "⚠️ <b>Invalid history limit</b>\nUse the History buttons to choose latest or all.",
+                reply_markup=size_menu_markup(settings),
             )
             return
         trades = await self.database.get_trade_history(limit=limit)
@@ -346,8 +515,7 @@ class TelegramTradingBot:
         if trade_id is None:
             await _reply(
                 update,
-                "🧾 <b>Position detail</b>\nUse <code>/position 1</code> "
-                "or type <code>#1</code>.",
+                "🧾 <b>Position detail</b>\nTap <b>Positions</b> and choose an open trade.",
                 reply_markup=position_menu_markup(await self.database.get_open_trades()),
             )
             return
@@ -411,10 +579,10 @@ class TelegramTradingBot:
             await _reply(
                 update,
                 "🎚 <b>Launch threshold:</b> score ≥ {0}\n"
-                "Use <code>/threshold 25</code> to change it live.".format(
+                "Use the Settings buttons to change it live.".format(
                     settings.launch_score_threshold
                 ),
-                reply_markup=menu_markup(),
+                reply_markup=exit_menu_markup(settings),
             )
             return
         threshold = _parse_score_threshold(raw_value)
@@ -424,7 +592,7 @@ class TelegramTradingBot:
                 "⚠️ <b>Invalid threshold</b>\n"
                 "Send a whole number from <code>0</code> to <code>100</code>, "
                 "for example <code>/threshold 25</code>.",
-                reply_markup=menu_markup(),
+                reply_markup=size_menu_markup(settings),
             )
             return
         updated = replace(
@@ -444,7 +612,7 @@ class TelegramTradingBot:
             "Launch mode may now buy when the AI score is positive and ≥ {0}/100.".format(
                 threshold
             ),
-            reply_markup=menu_markup(),
+            reply_markup=trading_menu_markup(settings),
         )
 
     async def launch_threshold(self, update: Any, context: Any) -> None:
@@ -513,6 +681,52 @@ class TelegramTradingBot:
             is_minimum=False,
         )
 
+    async def size_range(self, update: Any, context: Any) -> None:
+        """Set minimum and maximum dynamic trade size together."""
+
+        await self._register_notification_chat(update)
+        settings = await self.database.get_strategy_settings(
+            self.config.strategy_defaults
+        )
+        args = getattr(context, "args", []) if context is not None else []
+        if len(args) != 2:
+            await _reply(
+                update,
+                "📦 <b>Dynamic size range:</b> {0:g}..{1:g} SOL\n"
+                "Tap a Size preset below or use <code>/size_range 0.1 0.3</code> for a custom range.".format(
+                    settings.min_trade_amount_sol,
+                    settings.max_trade_amount_sol,
+                ),
+                reply_markup=exit_menu_markup(settings),
+            )
+            return
+        minimum = _parse_float(args[0])
+        maximum = _parse_float(args[1])
+        if (
+            minimum is None
+            or maximum is None
+            or minimum < 0.01
+            or maximum > 2.0
+            or minimum > maximum
+        ):
+            await _reply(
+                update,
+                "⚠️ <b>Invalid size range</b>\nUse two numbers from "
+                "<code>0.01</code> to <code>2</code> SOL, with min <= max.",
+                reply_markup=exit_menu_markup(settings),
+            )
+            return
+        await self._store_settings(
+            update,
+            replace(
+                settings,
+                min_trade_amount_sol=minimum,
+                max_trade_amount_sol=maximum,
+            ),
+            "Dynamic size range",
+            "{0:g}..{1:g} SOL".format(minimum, maximum),
+        )
+
     async def take_profit(self, update: Any, context: Any) -> None:
         """Set hard take-profit percentage."""
 
@@ -545,8 +759,7 @@ class TelegramTradingBot:
         if not raw_value:
             await _reply(
                 update,
-                "⏳ <b>Max hold:</b> {0}\nUse <code>/max_hold 60m</code>, "
-                "<code>/max_hold 2h</code>, or <code>/max_hold 1d</code>.".format(
+                "⏳ <b>Max hold:</b> {0}\nUse the Exit buttons for presets, or send a custom duration if needed.".format(
                     _duration_label(settings.max_hold_seconds)
                 ),
                 reply_markup=menu_markup(),
@@ -581,13 +794,12 @@ class TelegramTradingBot:
             "🧠 <b>Dynamic setup:</b> {0}\n"
             "📦 <b>AI size:</b> {1:g}..{2:g} SOL\n"
             "🛡 <b>AI exits:</b> SL 1..50% | TP 3..500% | trail 0..50% | max 60s..1d\n"
-            "Use <code>/min_trade_size</code>, <code>/max_trade_size</code>, "
-            "<code>/dynamic_setup_on</code>, or <code>/dynamic_setup_off</code>.".format(
+            "Use the Trading and Size buttons to change these controls.".format(
                 "ON" if settings.dynamic_setup_enabled else "OFF",
                 min_entry_size,
                 max_entry_size,
             ),
-            reply_markup=menu_markup(),
+            reply_markup=trading_menu_markup(settings),
         )
 
     async def dynamic_setup_on(self, update: Any, _context: Any) -> None:
@@ -624,7 +836,7 @@ class TelegramTradingBot:
         await _reply(
             update,
             "🔕 <b>Reports muted</b>\n"
-            "Use /notify_on or the menu to resume paper-trading reports.",
+            "Use the Reports buttons to resume paper-trading reports.",
             reply_markup=menu_markup(),
         )
 
@@ -697,12 +909,11 @@ class TelegramTradingBot:
                 _report_state(notification_chat_id, notifications_enabled)
             ),
             "💰 <b>Paper balance:</b> {0:.6f} SOL".format(balance),
-            "🎯 <b>Thresholds:</b> launch ≥ {0} | scout ≥ {1}".format(
-                settings.launch_score_threshold, settings.scout_score_threshold
+            "🎯 <b>Launch threshold:</b> ≥ {0}".format(
+                settings.launch_score_threshold
             ),
-            "🧭 <b>Strategies:</b> launch {0} | scout {1}".format(
-                "ON" if settings.launch_enabled else "OFF",
-                "ON" if settings.scout_enabled else "OFF",
+            "🧭 <b>Launch scanner:</b> {0}".format(
+                "ON" if settings.launch_enabled else "OFF"
             ),
             "📦 <b>Trade size:</b> static {0:.6f} SOL | dynamic {1:.6f}..{2:.6f} SOL".format(
                 settings.base_trade_amount,
@@ -723,16 +934,100 @@ class TelegramTradingBot:
             "⏱ <b>Cadence:</b> discover {0:g}s | exits {1:g}s".format(
                 settings.tracker_poll_seconds, settings.position_review_seconds
             ),
+            "🚧 <b>Risk gates:</b> block UTC {0} | buy/sell ≥ {1:g} | vol/liq ≥ {2:g}".format(
+                _html(settings.blocked_entry_utc_hours or "none"),
+                settings.min_buy_sell_ratio,
+                settings.min_volume_liquidity_ratio_5m,
+            ),
             "🌙 <b>Reflection:</b> {0} {1}".format(
                 _html(settings.reflection_time), _html(self.config.reflection_timezone)
             ),
             "📂 <b>Open positions:</b> {0}".format(len(open_trades)),
         ]
+        if settings.scout_enabled:
+            lines.insert(
+                8,
+                "🔎 <b>Scout scanner:</b> ON | threshold ≥ {0}".format(
+                    settings.scout_score_threshold
+                ),
+            )
         lines.extend(_format_open_trades(open_trades))
         if closed_trades:
             lines.append("")
             lines.append("✅ <b>Recent closed trades</b>")
             lines.extend(_format_closed_trades(closed_trades))
+        return "\n".join(lines)
+
+    async def render_trading_menu(self) -> str:
+        """Render trading controls for button menus."""
+
+        auto_enabled = await self.database.get_auto_trading()
+        settings = await self.database.get_strategy_settings(self.config.strategy_defaults)
+        return "\n".join(
+            [
+                "🤖 <b>Trading Controls</b>",
+                "Auto entries: <b>{0}</b>".format("ON" if auto_enabled else "OFF"),
+                "Launch scanner: <b>{0}</b>".format(
+                    "ON" if settings.launch_enabled else "OFF"
+                ),
+                "Scout scanner: <b>{0}</b>".format(
+                    "ON" if settings.scout_enabled else "OFF"
+                ),
+                "Dynamic setup: <b>{0}</b>".format(
+                    "ON" if settings.dynamic_setup_enabled else "OFF"
+                ),
+            ]
+        )
+
+    async def render_settings_menu(self) -> str:
+        """Render high-level settings for button menus."""
+
+        settings = await self.database.get_strategy_settings(self.config.strategy_defaults)
+        return "\n".join(
+            [
+                "⚙️ <b>Strategy Settings</b>",
+                "Launch threshold: <b>{0}/100</b>".format(
+                    settings.launch_score_threshold
+                ),
+                "Dynamic size: <b>{0:g}..{1:g} SOL</b>".format(
+                    settings.min_trade_amount_sol,
+                    settings.max_trade_amount_sol,
+                ),
+                "Hard exits: <b>TP {0:g}% | SL {1:g}% | trail {2:g}% | max {3}</b>".format(
+                    settings.take_profit_pct,
+                    settings.stop_loss_pct,
+                    settings.trailing_stop_pct,
+                    _duration_label(settings.max_hold_seconds),
+                ),
+                "Risk gates: <b>UTC {0} | buy/sell ≥ {1:g} | vol/liq ≥ {2:g}</b>".format(
+                    _html(settings.blocked_entry_utc_hours or "none"),
+                    settings.min_buy_sell_ratio,
+                    settings.min_volume_liquidity_ratio_5m,
+                ),
+            ]
+        )
+
+    async def render_reports_menu(self) -> str:
+        """Render notification controls for button menus."""
+
+        chat_id = await self.database.get_notification_chat_id()
+        enabled = await self.database.get_notifications_enabled()
+        return "\n".join(
+            [
+                "🔔 <b>Reports</b>",
+                "State: <b>{0}</b>".format(_report_state(chat_id, enabled)),
+                "This chat receives entry analysis, buys, position reviews, sells, reflection, and errors.",
+            ]
+        )
+
+    async def render_positions_menu(self) -> str:
+        """Render open-position chooser text."""
+
+        open_trades = await self.database.get_open_trades()
+        if not open_trades:
+            return "🧾 <b>Positions</b>\nNo open paper positions."
+        lines = ["🧾 <b>Positions</b>", "Tap a position to view or manage it."]
+        lines.extend(_format_open_trades(open_trades))
         return "\n".join(lines)
 
     async def render_pnl_image(
@@ -781,7 +1076,9 @@ class TelegramTradingBot:
         pnl_pct = _pct_change(trade.buy_price, current_price) if current_price else None
         lines = [
             "🧾 <b>Position #{0}</b> {1}".format(trade.id, _html(trade.status)),
-            "🪙 <b>Token:</b> <code>{0}</code>".format(_html(trade.token_address)),
+            "🪙 <b>Token:</b> {0}".format(
+                _format_trade_token_identity(trade, snapshot)
+            ),
             "🏁 <b>Entry:</b> ${0:.10g} | {1:.6f} SOL".format(
                 trade.buy_price, trade.entry_amount_sol
             ),
@@ -891,6 +1188,200 @@ class TelegramTradingBot:
             reply_markup=position_menu_markup(await self.database.get_open_trades()),
         )
 
+    async def _manual_close_by_callback(
+        self, update: Any, data: str, prefix: str, reason: str
+    ) -> None:
+        trade_id = _parse_callback_int(data, prefix)
+        if trade_id is None:
+            await _respond(
+                update,
+                "⚠️ <b>Position id missing</b>",
+                reply_markup=position_menu_markup(await self.database.get_open_trades()),
+            )
+            return
+        trade = await self.database.get_trade(trade_id)
+        if trade is None or trade.status != "OPEN":
+            await _respond(
+                update,
+                "⚠️ <b>Open position not found</b>\nTrade <code>#{0}</code> is not open.".format(
+                    trade_id
+                ),
+                reply_markup=position_menu_markup(await self.database.get_open_trades()),
+            )
+            return
+        if self.executor is None or self.tracker is None:
+            await _respond(
+                update,
+                "⚠️ <b>Manual close unavailable</b>\nThe Telegram bot needs tracker and executor services to close at current price.",
+                reply_markup=position_action_markup(trade),
+            )
+            return
+        snapshot = await self._current_snapshot(trade)
+        if snapshot is None:
+            await _respond(
+                update,
+                "⚠️ <b>Current price unavailable</b>\nCould not refresh this token.",
+                reply_markup=position_action_markup(trade),
+            )
+            return
+        result = await self.executor.close_trade(trade, snapshot, reason)
+        await self.database.add_activity(
+            "manual_sell" if result.success else "manual_sell_rejected",
+            result.message,
+            trade.token_address,
+            {"trade_id": trade.id, "pnl": result.pnl, "reason": reason},
+        )
+        decision = ExitDecision("sell_now", reason)
+        await _respond(
+            update,
+            format_sell_result(trade, snapshot, decision, result),
+            reply_markup=position_menu_markup(await self.database.get_open_trades()),
+        )
+
+    async def _handle_setting_button(self, update: Any, data: str) -> bool:
+        settings = await self.database.get_strategy_settings(self.config.strategy_defaults)
+        if data == "bot:auto:on":
+            await self.database.set_auto_trading(True)
+            await _respond(
+                update,
+                "🟢 <b>Auto entries enabled</b>",
+                reply_markup=trading_menu_markup(settings),
+            )
+            return True
+        if data == "bot:auto:off":
+            await self.database.set_auto_trading(False)
+            await _respond(
+                update,
+                "🔴 <b>Auto entries paused</b>",
+                reply_markup=trading_menu_markup(settings),
+            )
+            return True
+        toggle_map = {
+            "bot:launch:on": ("launch_enabled", True, "Launch mode"),
+            "bot:launch:off": ("launch_enabled", False, "Launch mode"),
+            "bot:scout:on": ("scout_enabled", True, "Scout mode"),
+            "bot:scout:off": ("scout_enabled", False, "Scout mode"),
+            "bot:dynamic:on": ("dynamic_setup_enabled", True, "Dynamic setup"),
+            "bot:dynamic:off": ("dynamic_setup_enabled", False, "Dynamic setup"),
+        }
+        if data in toggle_map:
+            field_name, enabled, label = toggle_map[data]
+            updated = replace(settings, **{field_name: enabled})
+            await self.database.set_strategy_settings(updated)
+            await self.database.add_activity(
+                "strategy_settings",
+                "{0} set to {1}".format(label, "ON" if enabled else "OFF"),
+                payload=updated.prompt_payload(),
+            )
+            await _respond(
+                update,
+                "✅ <b>{0} updated</b>\nNow set to <code>{1}</code>.".format(
+                    _html(label), "ON" if enabled else "OFF"
+                ),
+                reply_markup=trading_menu_markup(updated),
+            )
+            return True
+        if data.startswith("bot:threshold:"):
+            value = _parse_callback_int(data, "bot:threshold:")
+            if value is not None:
+                updated = replace(
+                    settings,
+                    entry_score_threshold=value,
+                    launch_score_threshold=value,
+                )
+                await self.database.set_strategy_settings(updated)
+                await self.database.add_activity(
+                    "strategy_threshold",
+                    "launch score threshold set to {0}".format(value),
+                    payload={"launch_score_threshold": value},
+                )
+                await _respond(
+                    update,
+                    "✅ <b>Launch threshold updated</b>\nNow set to <code>{0}/100</code>.".format(
+                        value
+                    ),
+                    reply_markup=settings_menu_markup(updated),
+                )
+            return True
+        if data.startswith("bot:size:"):
+            raw = data[len("bot:size:") :]
+            try:
+                min_text, max_text = raw.split(":", 1)
+                minimum = float(min_text)
+                maximum = float(max_text)
+            except ValueError:
+                return True
+            updated = replace(
+                settings,
+                min_trade_amount_sol=minimum,
+                max_trade_amount_sol=maximum,
+            )
+            await self.database.set_strategy_settings(updated)
+            await self.database.add_activity(
+                "strategy_settings",
+                "Dynamic size range set to {0:g}..{1:g} SOL".format(minimum, maximum),
+                payload=updated.prompt_payload(),
+            )
+            await _respond(
+                update,
+                "✅ <b>Dynamic size range updated</b>\nNow set to <code>{0:g}..{1:g} SOL</code>.".format(
+                    minimum, maximum
+                ),
+                reply_markup=size_menu_markup(updated),
+            )
+            return True
+        if data.startswith("bot:exit:"):
+            updated, label, value = _updated_exit_setting(settings, data)
+            if updated is not None:
+                await self.database.set_strategy_settings(updated)
+                await self.database.add_activity(
+                    "strategy_settings",
+                    "{0} set to {1}".format(label, value),
+                    payload=updated.prompt_payload(),
+                )
+                await _respond(
+                    update,
+                    "✅ <b>{0} updated</b>\nNow set to <code>{1}</code>.".format(
+                        _html(label), _html(value)
+                    ),
+                    reply_markup=exit_menu_markup(updated),
+                )
+            return True
+        if data.startswith("bot:risk:"):
+            updated, label, value = _updated_risk_setting(settings, data)
+            if updated is not None:
+                await self.database.set_strategy_settings(updated)
+                await self.database.add_activity(
+                    "strategy_settings",
+                    "{0} set to {1}".format(label, value),
+                    payload=updated.prompt_payload(),
+                )
+                await _respond(
+                    update,
+                    "✅ <b>{0} updated</b>\nNow set to <code>{1}</code>.".format(
+                        _html(label), _html(value)
+                    ),
+                    reply_markup=risk_menu_markup(updated),
+                )
+            return True
+        if data == "bot:notify:on":
+            await self.database.set_notifications_enabled(True)
+            await _respond(
+                update,
+                "🔔 <b>Reports enabled</b>",
+                reply_markup=reports_menu_markup(True),
+            )
+            return True
+        if data == "bot:notify:off":
+            await self.database.set_notifications_enabled(False)
+            await _respond(
+                update,
+                "🔕 <b>Reports muted</b>",
+                reply_markup=reports_menu_markup(False),
+            )
+            return True
+        return False
+
     async def _current_snapshot(self, trade: TradeRecord) -> Optional[TokenSnapshot]:
         if self.tracker is None:
             return None
@@ -929,6 +1420,7 @@ class TelegramTradingBot:
                     BotCommand("scout_threshold", "set scout buy score threshold"),
                     BotCommand("min_trade_size", "set minimum dynamic trade size"),
                     BotCommand("max_trade_size", "set maximum dynamic trade size"),
+                    BotCommand("size_range", "set dynamic trade size range"),
                     BotCommand("take_profit", "set hard take profit percent"),
                     BotCommand("stop_loss", "set hard stop loss percent"),
                     BotCommand("trailing_stop", "set trailing stop percent"),
@@ -982,8 +1474,8 @@ class TelegramTradingBot:
         if not raw_value:
             await _reply(
                 update,
-                "🎚 <b>{0}:</b> {1}\nUse <code>/{2} {1}</code> to change it.".format(
-                    _html(label), current_value, field_name.replace("_score", "")
+                "🎚 <b>{0}:</b> {1}\nUse the Settings buttons to change presets.".format(
+                    _html(label), current_value
                 ),
                 reply_markup=menu_markup(),
             )
@@ -1133,6 +1625,21 @@ async def _reply(update: Any, text: str, reply_markup: Any = None) -> None:
         )
 
 
+async def _respond(update: Any, text: str, reply_markup: Any = None) -> None:
+    query = getattr(update, "callback_query", None)
+    if query is not None:
+        try:
+            await query.edit_message_text(
+                text=text,
+                parse_mode=PARSE_MODE,
+                reply_markup=reply_markup,
+            )
+            return
+        except Exception:
+            pass
+    await _reply(update, text, reply_markup=reply_markup)
+
+
 async def _reply_photo(
     update: Any, image_path: Path, caption: str, reply_markup: Any = None
 ) -> None:
@@ -1167,12 +1674,23 @@ def _format_open_trades(trades: List[TradeRecord]) -> List[str]:
 
 
 def _format_closed_trades(trades: List[TradeRecord]) -> List[str]:
-    return [
-        "• #{0} <code>{1}</code> PnL {2:+.6f} SOL".format(
-            trade.id, _html(_short_token(trade.token_address)), trade.pnl or 0.0
+    lines = []
+    for trade in trades:
+        pnl_pct = _pct_change(trade.buy_price, trade.sell_price)
+        lines.append(
+            "• #{0} {1} size {2:.6f} SOL sell {3} PnL {4} ({5}) exit {6}".format(
+                trade.id,
+                _format_trade_token_identity(trade),
+                trade.entry_amount_sol,
+                "${0:.10g}".format(trade.sell_price)
+                if trade.sell_price is not None
+                else "n/a",
+                _pnl_label(trade.pnl),
+                _metric(pnl_pct, "%"),
+                _html(_short_reason(trade.exit_reason)),
+            )
         )
-        for trade in trades
-    ]
+    return lines
 
 
 def _short_token(token_address: str) -> str:
@@ -1181,20 +1699,80 @@ def _short_token(token_address: str) -> str:
     return "{0}...{1}".format(token_address[:7], token_address[-5:])
 
 
+def _short_reason(reason: Optional[str]) -> str:
+    text = str(reason or "n/a").strip()
+    if len(text) <= 48:
+        return text
+    return "{0}...".format(text[:45])
+
+
+def _format_snapshot_token_identity(snapshot: TokenSnapshot) -> str:
+    return _format_token_identity(
+        snapshot.token_address,
+        snapshot.token_name,
+        snapshot.token_symbol,
+    )
+
+
+def _format_trade_token_identity(
+    trade: TradeRecord, snapshot: Optional[TokenSnapshot] = None
+) -> str:
+    if snapshot is not None:
+        return _format_snapshot_token_identity(snapshot)
+    metadata = _trade_token_metadata(trade)
+    return _format_token_identity(
+        trade.token_address,
+        metadata.get("token_name"),
+        metadata.get("token_symbol"),
+    )
+
+
+def _format_token_identity(
+    token_address: str, token_name: Any = None, token_symbol: Any = None
+) -> str:
+    name = str(token_name or "").strip()
+    symbol = str(token_symbol or "").strip()
+    if name and symbol:
+        label = "{0} ({1})".format(name, symbol)
+    elif name:
+        label = name
+    elif symbol:
+        label = symbol
+    else:
+        label = "Unknown token"
+    return "{0} | CA <code>{1}</code>".format(_html(label), _html(token_address))
+
+
+def _trade_token_metadata(trade: TradeRecord) -> dict[str, Any]:
+    for raw_json in (trade.exit_snapshot_json, trade.entry_snapshot_json):
+        try:
+            payload = json.loads(raw_json or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        if isinstance(payload, dict):
+            name = payload.get("token_name")
+            symbol = payload.get("token_symbol")
+            if name or symbol:
+                return {"token_name": name, "token_symbol": symbol}
+    return {}
+
+
 def format_trade_history(trades: List[TradeRecord]) -> str:
     if not trades:
         return "📜 <b>Trading History</b>\nNo paper trades yet."
     lines = ["📜 <b>Trading History</b>"]
     for trade in trades:
         pnl = _pnl_label(trade.pnl)
+        pnl_pct = _pct_change(trade.buy_price, trade.sell_price)
         lines.append(
-            "• #{0} {1} <code>{2}</code> entry ${3:.10g} size {4:.6f} SOL PnL {5}".format(
+            "• #{0} {1} {2} entry ${3:.10g} size {4:.6f} SOL PnL {5} ({6})".format(
                 trade.id,
                 _html(trade.status),
-                _html(_short_token(trade.token_address)),
+                _format_trade_token_identity(trade),
                 trade.buy_price,
                 trade.entry_amount_sol,
                 pnl,
+                _metric(pnl_pct, "%"),
             )
         )
     return "\n".join(lines[:80])
@@ -1206,7 +1784,7 @@ def format_entry_analysis(snapshot: TokenSnapshot, evaluation: TokenEvaluation) 
     lines = [
             "{0} <b>Paper Entry Analysis</b>".format(_entry_icon(evaluation)),
             "🎯 <b>Strategy:</b> {0}".format(_html(snapshot.strategy.upper())),
-            "🪙 <b>Token:</b> <code>{0}</code>".format(_html(snapshot.token_address)),
+            "🪙 <b>Token:</b> {0}".format(_format_snapshot_token_identity(snapshot)),
             "🔗 <b>Pair:</b> <code>{0}</code>".format(_html(snapshot.pair_address)),
             "🧠 <b>Decision:</b> {0} | <b>Score:</b> {1}/100".format(
                 _decision_label(evaluation.decision), evaluation.score
@@ -1281,7 +1859,7 @@ def format_buy_result(
                 "🟢" if result.success else "🟠",
                 "Opened" if result.success else "Rejected",
             ),
-            "🪙 <b>Token:</b> <code>{0}</code>".format(_html(snapshot.token_address)),
+            "🪙 <b>Token:</b> {0}".format(_format_snapshot_token_identity(snapshot)),
             "🧾 <b>Trade:</b> {0}".format(
                 "#{0}".format(result.trade_id) if result.trade_id else "n/a"
             ),
@@ -1316,13 +1894,55 @@ def format_exit_analysis(
         [
             "{0} <b>Paper Exit Analysis</b>".format(_exit_icon(decision)),
             "🧾 <b>Trade:</b> #{0}".format(trade.id),
-            "🪙 <b>Token:</b> <code>{0}</code>".format(_html(trade.token_address)),
+            "🪙 <b>Token:</b> {0}".format(
+                _format_trade_token_identity(trade, snapshot)
+            ),
             "🧠 <b>Decision:</b> {0}".format(_decision_label(decision.decision)),
             "🏁 <b>Entry:</b> ${0:.10g}".format(trade.buy_price),
             "💵 <b>Current:</b> ${0:.10g}".format(snapshot.price_usd),
+            "📦 <b>Entry size:</b> {0:.6f} SOL".format(trade.entry_amount_sol),
+            "📊 <b>Unrealized PnL:</b> {0} ({1})".format(
+                _pnl_label(_unrealized_pnl(trade, snapshot.price_usd)),
+                _metric(_pct_change(trade.buy_price, snapshot.price_usd), "%"),
+            ),
             "📝 <b>Reason:</b> {0}".format(
                 _html(decision.rationale or "No rationale returned.")
             ),
+        ]
+    )
+
+
+def format_buy_more_result(
+    trade: TradeRecord,
+    snapshot: TokenSnapshot,
+    decision: ExitDecision,
+    result: TradeResult,
+) -> str:
+    """Format a paper add-on buy success or rejection."""
+
+    return "\n".join(
+        [
+            "{0} <b>Paper Buy More {1}</b>".format(
+                "➕" if result.success else "🟠",
+                "Added" if result.success else "Rejected",
+            ),
+            "🧾 <b>Trade:</b> #{0}".format(trade.id),
+            "🪙 <b>Token:</b> {0}".format(_format_snapshot_token_identity(snapshot)),
+            "📦 <b>Add size:</b> {0}".format(
+                "{0:.6f} SOL".format(result.entry_amount_sol)
+                if result.entry_amount_sol is not None
+                else "n/a"
+            ),
+            "📦 <b>Previous size:</b> {0:.6f} SOL".format(trade.entry_amount_sol),
+            "💵 <b>Add price:</b> ${0:.10g}".format(snapshot.price_usd),
+            "📊 <b>Unrealized PnL before add:</b> {0} ({1})".format(
+                _pnl_label(_unrealized_pnl(trade, snapshot.price_usd)),
+                _metric(_pct_change(trade.buy_price, snapshot.price_usd), "%"),
+            ),
+            "📝 <b>AI reason:</b> {0}".format(
+                _html(decision.rationale or "AI buy-more")
+            ),
+            "ℹ️ <b>Detail:</b> {0}".format(_html(result.message)),
         ]
     )
 
@@ -1342,15 +1962,17 @@ def format_sell_result(
                 "Closed" if result.success else "Rejected",
             ),
             "🧾 <b>Trade:</b> #{0}".format(trade.id),
-            "🪙 <b>Token:</b> <code>{0}</code>".format(_html(snapshot.token_address)),
+            "🪙 <b>Token:</b> {0}".format(_format_snapshot_token_identity(snapshot)),
             "📦 <b>Entry size:</b> {0:.6f} SOL".format(trade.entry_amount_sol),
+            "💵 <b>Sell price:</b> ${0:.10g}".format(snapshot.price_usd),
             "📝 <b>Exit reason:</b> {0}".format(
                 _html(decision.rationale or "AI close")
             ),
-            "📊 <b>PnL:</b> {0}".format(
+            "📊 <b>PnL:</b> {0} ({1})".format(
                 "{0:+.6f} SOL".format(result.pnl)
                 if result.pnl is not None
-                else "unavailable"
+                else "unavailable",
+                _metric(_pct_change(trade.buy_price, snapshot.price_usd), "%"),
             ),
             "ℹ️ <b>Detail:</b> {0}".format(_html(result.message)),
         ]
@@ -1378,7 +2000,7 @@ def welcome_text() -> str:
     return (
         "🧪 <b>Paper Trader Ready</b>\n"
         "🧠 AI analysis reports and paper trade outcomes can land in this chat.\n"
-        "⚡ Use the menu below to control auto entries and notifications.\n"
+        "⚡ Use the buttons below to control entries, positions, settings, and reports.\n"
         "🛑 REAL trading remains disabled in v1."
     )
 
@@ -1388,50 +2010,61 @@ def menu_text() -> str:
 
     return (
         "🎛 <b>Paper Bot Menu</b>\n"
-        "📊 Check status, 🟢 enable entries, 🔴 pause entries,\n"
-        "🎚 inspect threshold, 📜 history, ⚙️ settings, 🔔 reports, or 🔕 mute."
+        "Tap a button to manage status, positions, trading, settings, history, or reports."
     )
 
 
 def menu_markup() -> Any:
-    """Build the persistent Telegram menu keyboard."""
+    """Build the main inline Telegram menu."""
 
-    from telegram import ReplyKeyboardMarkup
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-    return ReplyKeyboardMarkup(
+    return InlineKeyboardMarkup(
         [
-            [MENU_STATUS, MENU_HISTORY, MENU_SETTINGS],
-            [MENU_THRESHOLD],
-            [MENU_AUTO_ON, MENU_AUTO_OFF],
-            [MENU_NOTIFY_ON, MENU_NOTIFY_OFF],
-        ],
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder="Choose a paper bot action",
+            [
+                InlineKeyboardButton("📊 Status", callback_data="bot:status"),
+                InlineKeyboardButton("🧾 Positions", callback_data="bot:positions"),
+            ],
+            [
+                InlineKeyboardButton("🤖 Trading", callback_data="bot:trading"),
+                InlineKeyboardButton("⚙️ Settings", callback_data="bot:settings"),
+            ],
+            [
+                InlineKeyboardButton("📜 History", callback_data="bot:history"),
+                InlineKeyboardButton("🔔 Reports", callback_data="bot:reports"),
+            ],
+        ]
     )
 
 
 def position_menu_markup(open_trades: List[TradeRecord]) -> Any:
-    """Build a menu that exposes open position ids as direct buttons."""
+    """Build an inline menu that exposes open position ids as direct buttons."""
 
-    from telegram import ReplyKeyboardMarkup
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
     position_rows = [
-        ["#{0}".format(trade.id) for trade in open_trades[index : index + 3]]
+        [
+            InlineKeyboardButton(
+                "#{0}".format(trade.id),
+                callback_data="bot:position:{0}".format(trade.id),
+            )
+            for trade in open_trades[index : index + 3]
+        ]
         for index in range(0, len(open_trades), 3)
     ]
     rows = [
-        [MENU_STATUS, MENU_HISTORY, MENU_SETTINGS],
+        [
+            InlineKeyboardButton("📊 Status", callback_data="bot:status"),
+            InlineKeyboardButton("📜 History", callback_data="bot:history"),
+        ],
         *position_rows,
-        [MENU_AUTO_ON, MENU_AUTO_OFF],
-        [MENU_NOTIFY_ON, MENU_NOTIFY_OFF],
+        [
+            InlineKeyboardButton("🤖 Trading", callback_data="bot:trading"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="bot:settings"),
+        ],
+        [InlineKeyboardButton("⬅️ Main Menu", callback_data="bot:menu")],
     ]
-    return ReplyKeyboardMarkup(
-        rows,
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder="Choose status or a position id",
-    )
+    return InlineKeyboardMarkup(rows)
 
 
 def position_action_markup(trade: Optional[TradeRecord]) -> Any:
@@ -1439,16 +2072,192 @@ def position_action_markup(trade: Optional[TradeRecord]) -> Any:
 
     if trade is None or trade.status != "OPEN":
         return menu_markup()
-    from telegram import ReplyKeyboardMarkup
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
-    return ReplyKeyboardMarkup(
+    return InlineKeyboardMarkup(
         [
-            ["✅ Take Profit #{0}".format(trade.id), "🛑 Cut Loss #{0}".format(trade.id)],
-            [MENU_STATUS, MENU_HISTORY],
-        ],
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder="Choose a manual action",
+            [
+                InlineKeyboardButton(
+                    "✅ Take Profit", callback_data="bot:tp:{0}".format(trade.id)
+                ),
+                InlineKeyboardButton(
+                    "🛑 Cut Loss", callback_data="bot:sl:{0}".format(trade.id)
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "💸 Close", callback_data="bot:close:{0}".format(trade.id)
+                ),
+                InlineKeyboardButton("🧾 Positions", callback_data="bot:positions"),
+            ],
+            [InlineKeyboardButton("⬅️ Main Menu", callback_data="bot:menu")],
+        ]
+    )
+
+
+def history_menu_markup() -> Any:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Latest 50", callback_data="bot:history"),
+                InlineKeyboardButton("All", callback_data="bot:history:all"),
+            ],
+            [InlineKeyboardButton("⬅️ Main Menu", callback_data="bot:menu")],
+        ]
+    )
+
+
+def trading_menu_markup(settings: Any) -> Any:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🟢 Auto On", callback_data="bot:auto:on"),
+                InlineKeyboardButton("🔴 Auto Off", callback_data="bot:auto:off"),
+            ],
+            [
+                InlineKeyboardButton(
+                    "Launch {0}".format("OFF" if settings.launch_enabled else "ON"),
+                    callback_data=(
+                        "bot:launch:off" if settings.launch_enabled else "bot:launch:on"
+                    ),
+                ),
+                InlineKeyboardButton(
+                    "Scout {0}".format("OFF" if settings.scout_enabled else "ON"),
+                    callback_data=(
+                        "bot:scout:off" if settings.scout_enabled else "bot:scout:on"
+                    ),
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    "Dynamic {0}".format(
+                        "OFF" if settings.dynamic_setup_enabled else "ON"
+                    ),
+                    callback_data=(
+                        "bot:dynamic:off"
+                        if settings.dynamic_setup_enabled
+                        else "bot:dynamic:on"
+                    ),
+                ),
+                InlineKeyboardButton("⚙️ Settings", callback_data="bot:settings"),
+            ],
+            [InlineKeyboardButton("⬅️ Main Menu", callback_data="bot:menu")],
+        ]
+    )
+
+
+def settings_menu_markup(settings: Any) -> Any:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Threshold 25", callback_data="bot:threshold:25"),
+                InlineKeyboardButton("Threshold 30", callback_data="bot:threshold:30"),
+                InlineKeyboardButton("Threshold 35", callback_data="bot:threshold:35"),
+            ],
+            [
+                InlineKeyboardButton("📦 Size", callback_data="bot:size"),
+                InlineKeyboardButton("🛡 Exits", callback_data="bot:exits"),
+                InlineKeyboardButton("🚧 Risk", callback_data="bot:risk"),
+            ],
+            [
+                InlineKeyboardButton("🤖 Trading", callback_data="bot:trading"),
+                InlineKeyboardButton("⬅️ Main Menu", callback_data="bot:menu"),
+            ],
+        ]
+    )
+
+
+def size_menu_markup(settings: Any) -> Any:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("0.05..0.15", callback_data="bot:size:0.05:0.15"),
+                InlineKeyboardButton("0.1..0.3", callback_data="bot:size:0.1:0.3"),
+            ],
+            [
+                InlineKeyboardButton("0.15..0.4", callback_data="bot:size:0.15:0.4"),
+                InlineKeyboardButton("0.2..0.5", callback_data="bot:size:0.2:0.5"),
+            ],
+            [
+                InlineKeyboardButton("⚙️ Settings", callback_data="bot:settings"),
+                InlineKeyboardButton("⬅️ Main Menu", callback_data="bot:menu"),
+            ],
+        ]
+    )
+
+
+def exit_menu_markup(settings: Any) -> Any:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("SL 6%", callback_data="bot:exit:sl:6"),
+                InlineKeyboardButton("SL 8%", callback_data="bot:exit:sl:8"),
+                InlineKeyboardButton("SL 10%", callback_data="bot:exit:sl:10"),
+            ],
+            [
+                InlineKeyboardButton("TP 12%", callback_data="bot:exit:tp:12"),
+                InlineKeyboardButton("TP 18%", callback_data="bot:exit:tp:18"),
+                InlineKeyboardButton("TP 25%", callback_data="bot:exit:tp:25"),
+            ],
+            [
+                InlineKeyboardButton("Trail 5%", callback_data="bot:exit:trail:5"),
+                InlineKeyboardButton("Trail 7%", callback_data="bot:exit:trail:7"),
+                InlineKeyboardButton("Max 10m", callback_data="bot:exit:max:600"),
+            ],
+            [
+                InlineKeyboardButton("⚙️ Settings", callback_data="bot:settings"),
+                InlineKeyboardButton("⬅️ Main Menu", callback_data="bot:menu"),
+            ],
+        ]
+    )
+
+
+def risk_menu_markup(settings: Any) -> Any:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Block UTC 20", callback_data="bot:risk:block:20"),
+                InlineKeyboardButton("No Hour Block", callback_data="bot:risk:block:none"),
+            ],
+            [
+                InlineKeyboardButton("Buy/Sell 1.15", callback_data="bot:risk:ratio:1.15"),
+                InlineKeyboardButton("Buy/Sell 1.5", callback_data="bot:risk:ratio:1.5"),
+            ],
+            [
+                InlineKeyboardButton("Top Holders 35%", callback_data="bot:risk:holders:35"),
+                InlineKeyboardButton("Top Holders 45%", callback_data="bot:risk:holders:45"),
+            ],
+            [
+                InlineKeyboardButton("⚙️ Settings", callback_data="bot:settings"),
+                InlineKeyboardButton("⬅️ Main Menu", callback_data="bot:menu"),
+            ],
+        ]
+    )
+
+
+def reports_menu_markup(enabled: bool) -> Any:
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("🔔 Reports On", callback_data="bot:notify:on"),
+                InlineKeyboardButton("🔕 Reports Off", callback_data="bot:notify:off"),
+            ],
+            [InlineKeyboardButton("⬅️ Main Menu", callback_data="bot:menu")],
+        ]
     )
 
 
@@ -1457,6 +2266,8 @@ def _entry_icon(evaluation: TokenEvaluation) -> str:
 
 
 def _exit_icon(decision: ExitDecision) -> str:
+    if decision.wants_buy_more:
+        return "➕"
     return "💸" if decision.wants_close else "🛡️"
 
 
@@ -1465,9 +2276,117 @@ def _decision_label(decision: str) -> str:
         "buy": "🟢 BUY",
         "skip": "🟠 SKIP",
         "close": "💸 CLOSE",
+        "sell_now": "💸 SELL NOW",
+        "buy_more": "➕ BUY MORE",
         "hold": "🛡️ HOLD",
     }
     return labels.get(decision.lower(), _html(decision.upper()))
+
+
+def _size_menu_text(settings: Any) -> str:
+    return (
+        "📦 <b>Dynamic Size</b>\n"
+        "Current range: <b>{0:g}..{1:g} SOL</b>\n"
+        "Tap a preset below.".format(
+            settings.min_trade_amount_sol,
+            settings.max_trade_amount_sol,
+        )
+    )
+
+
+def _exit_menu_text(settings: Any) -> str:
+    return (
+        "🛡 <b>Hard Exit Settings</b>\n"
+        "TP <b>{0:g}%</b> | SL <b>{1:g}%</b> | trail <b>{2:g}%</b> | max <b>{3}</b>\n"
+        "Tap a preset below.".format(
+            settings.take_profit_pct,
+            settings.stop_loss_pct,
+            settings.trailing_stop_pct,
+            _duration_label(settings.max_hold_seconds),
+        )
+    )
+
+
+def _risk_menu_text(settings: Any) -> str:
+    return (
+        "🚧 <b>Entry Risk Gates</b>\n"
+        "Blocked UTC: <b>{0}</b>\n"
+        "Buy/sell ≥ <b>{1:g}</b> | vol/liq ≥ <b>{2:g}</b> | top holders ≤ <b>{3:g}%</b>".format(
+            _html(settings.blocked_entry_utc_hours or "none"),
+            settings.min_buy_sell_ratio,
+            settings.min_volume_liquidity_ratio_5m,
+            settings.max_top_holder_share_pct,
+        )
+    )
+
+
+def _parse_callback_int(data: str, prefix: str) -> Optional[int]:
+    if not data.startswith(prefix):
+        return None
+    try:
+        return int(data[len(prefix) :])
+    except ValueError:
+        return None
+
+
+def _updated_exit_setting(settings: Any, data: str) -> tuple[Any, str, str]:
+    parts = data.split(":")
+    if len(parts) != 4:
+        return None, "", ""
+    kind = parts[2]
+    try:
+        value = float(parts[3])
+    except ValueError:
+        return None, "", ""
+    if kind == "sl":
+        return replace(settings, stop_loss_pct=value), "Stop loss", "{0:g}%".format(value)
+    if kind == "tp":
+        return replace(settings, take_profit_pct=value), "Take profit", "{0:g}%".format(value)
+    if kind == "trail":
+        return (
+            replace(settings, trailing_stop_pct=value),
+            "Trailing stop",
+            "{0:g}%".format(value),
+        )
+    if kind == "max":
+        return (
+            replace(settings, max_hold_seconds=value),
+            "Max hold",
+            _duration_label(value),
+        )
+    return None, "", ""
+
+
+def _updated_risk_setting(settings: Any, data: str) -> tuple[Any, str, str]:
+    parts = data.split(":")
+    if len(parts) != 4:
+        return None, "", ""
+    kind = parts[2]
+    raw_value = parts[3]
+    if kind == "block":
+        value = "" if raw_value == "none" else raw_value
+        return (
+            replace(settings, blocked_entry_utc_hours=value),
+            "Blocked UTC hours",
+            value or "none",
+        )
+    try:
+        value = float(raw_value)
+    except ValueError:
+        return None, "", ""
+    if kind == "ratio":
+        return (
+            replace(settings, min_buy_sell_ratio=value),
+            "Minimum buy/sell ratio",
+            "{0:g}".format(value),
+        )
+    if kind == "holders":
+        return (
+            replace(settings, max_top_holder_share_pct=value),
+            "Max top-holder share",
+            "{0:g}%".format(value),
+        )
+    return None, "", ""
 
 
 def _parse_score_threshold(raw_value: str) -> Optional[int]:

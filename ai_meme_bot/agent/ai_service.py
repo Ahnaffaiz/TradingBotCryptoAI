@@ -201,25 +201,41 @@ class TradingAIService:
             return TokenEvaluation()
 
     async def evaluate_exit(
-        self, trade: TradeRecord, snapshot: TokenSnapshot, rules: str
+        self,
+        trade: TradeRecord,
+        snapshot: TokenSnapshot,
+        rules: str,
+        settings: Optional[StrategySettings] = None,
     ) -> ExitDecision:
-        """Return a validated hold/close result for an open paper trade."""
+        """Return a validated hold/buy-more/sell-now result for an open paper trade."""
 
+        active_settings = settings or StrategySettings(25, 30.0, 0.1, 15.0, "00:00")
+        min_entry_size, max_entry_size = active_settings.trade_size_bounds()
         prompt = {
-            "task": "Evaluate whether this open paper position should close now.",
+            "task": (
+                "Evaluate whether this open paper position should hold, buy more, "
+                "or sell now."
+            ),
             "strategy": (
                 "Short-term memecoin scalp mode. Prefer protecting profit over long "
-                "holds. Close quickly when a position has a useful gain, sell pressure "
+                "holds. Sell now when a position has a useful gain, sell pressure "
                 "appears, volume fades, rug/scam language appears, or the trade is "
-                "aging past its configured scalp window. Hard take-profit, stop-loss, "
-                "trailing-stop, and max-hold rules may close before this AI review."
+                "aging past its configured scalp window. Buy more only for unusually "
+                "strong open winners with improving liquidity, dominant buy pressure, "
+                "and no concentration or rug-language warning. Hard take-profit, "
+                "stop-loss, trailing-stop, and max-hold rules may close before this AI "
+                "review."
             ),
             "trade": _trade_prompt_payload(trade),
             "current_snapshot": snapshot.prompt_payload(),
             "latest_rules": rules or "No learned rules yet.",
+            "current_settings": active_settings.prompt_payload(),
             "response_schema": {
-                "decision": "hold or close",
+                "decision": "hold, buy_more, or sell_now",
                 "rationale": "short string",
+                "add_amount_sol": (
+                    "optional number {0:g}..{1:g}; only used when decision is buy_more"
+                ).format(min_entry_size, max_entry_size),
             },
         }
         try:
@@ -230,9 +246,23 @@ class TradingAIService:
                 raise ValueError("exit response is not JSON")
             decision = str(payload["decision"]).lower()
             rationale = str(payload.get("rationale", "")).strip()
-            if decision not in {"hold", "close"}:
+            if decision == "close":
+                decision = "sell_now"
+            if decision not in {"hold", "buy_more", "sell_now"}:
                 raise ValueError("exit decision is invalid")
-            return ExitDecision(decision=decision, rationale=rationale)
+            add_amount = None
+            if decision == "buy_more":
+                add_amount = _bounded_float(
+                    payload.get("add_amount_sol"),
+                    min_entry_size,
+                    max_entry_size,
+                    min_entry_size,
+                )
+            return ExitDecision(
+                decision=decision,
+                rationale=rationale,
+                add_amount_sol=add_amount,
+            )
         except Exception as exc:
             LOGGER.warning("Exit AI response rejected: %s", exc)
             return ExitDecision()
@@ -274,6 +304,14 @@ class TradingAIService:
                     "max_hold_seconds": "number 60..86400",
                     "min_trade_amount_sol": "number 0.01..2.0",
                     "max_trade_amount_sol": "number 0.01..2.0",
+                    "blocked_entry_utc_hours": "comma-separated UTC hours, e.g. 20",
+                    "min_buy_sell_ratio": "number 0..10",
+                    "min_volume_liquidity_ratio_5m": "number 0..10",
+                    "max_top_holder_share_pct": "number 0..100",
+                    "max_momentum_5m_pct": "number 0..1000",
+                    "momentum_exhaustion_min_buy_sell_ratio": "number 0..10",
+                    "max_buy_more_count": "integer 0..10",
+                    "buy_more_cooldown_seconds": "number 0..3600",
                     "scout_min_liquidity_usd": "number 1000..1000000",
                     "scout_min_volume_5m_usd": "number 0..1000000",
                     "reflection_time": "HH:MM 24-hour wall clock",
@@ -397,6 +435,70 @@ def _validated_settings(
         scout_min_volume_5m_usd = float(
             payload.get("scout_min_volume_5m_usd", 500.0)
         )
+        blocked_entry_utc_hours = str(
+            payload.get(
+                "blocked_entry_utc_hours",
+                current_settings.blocked_entry_utc_hours
+                if current_settings is not None
+                else "20",
+            )
+        ).strip()
+        min_buy_sell_ratio = float(
+            payload.get(
+                "min_buy_sell_ratio",
+                current_settings.min_buy_sell_ratio
+                if current_settings is not None
+                else 1.15,
+            )
+        )
+        min_volume_liquidity_ratio_5m = float(
+            payload.get(
+                "min_volume_liquidity_ratio_5m",
+                current_settings.min_volume_liquidity_ratio_5m
+                if current_settings is not None
+                else 0.03,
+            )
+        )
+        max_top_holder_share_pct = float(
+            payload.get(
+                "max_top_holder_share_pct",
+                current_settings.max_top_holder_share_pct
+                if current_settings is not None
+                else 35.0,
+            )
+        )
+        max_momentum_5m_pct = float(
+            payload.get(
+                "max_momentum_5m_pct",
+                current_settings.max_momentum_5m_pct
+                if current_settings is not None
+                else 80.0,
+            )
+        )
+        momentum_exhaustion_min_buy_sell_ratio = float(
+            payload.get(
+                "momentum_exhaustion_min_buy_sell_ratio",
+                current_settings.momentum_exhaustion_min_buy_sell_ratio
+                if current_settings is not None
+                else 2.0,
+            )
+        )
+        max_buy_more_count = int(
+            payload.get(
+                "max_buy_more_count",
+                current_settings.max_buy_more_count
+                if current_settings is not None
+                else 2,
+            )
+        )
+        buy_more_cooldown_seconds = float(
+            payload.get(
+                "buy_more_cooldown_seconds",
+                current_settings.buy_more_cooldown_seconds
+                if current_settings is not None
+                else 120.0,
+            )
+        )
         reflection_time = str(payload["reflection_time"]).strip()
     except (KeyError, TypeError, ValueError):
         return None
@@ -430,6 +532,22 @@ def _validated_settings(
         return None
     if not 0 <= scout_min_volume_5m_usd <= 1000000:
         return None
+    if not _valid_hour_list(blocked_entry_utc_hours):
+        return None
+    if not 0 <= min_buy_sell_ratio <= 10:
+        return None
+    if not 0 <= min_volume_liquidity_ratio_5m <= 10:
+        return None
+    if not 0 <= max_top_holder_share_pct <= 100:
+        return None
+    if not 0 <= max_momentum_5m_pct <= 1000:
+        return None
+    if not 0 <= momentum_exhaustion_min_buy_sell_ratio <= 10:
+        return None
+    if not 0 <= max_buy_more_count <= 10:
+        return None
+    if not 0 <= buy_more_cooldown_seconds <= 3600:
+        return None
     if not _valid_hhmm(reflection_time):
         return None
     return StrategySettings(
@@ -455,6 +573,14 @@ def _validated_settings(
         ),
         min_trade_amount_sol,
         max_trade_amount_sol,
+        blocked_entry_utc_hours,
+        min_buy_sell_ratio,
+        min_volume_liquidity_ratio_5m,
+        max_top_holder_share_pct,
+        max_momentum_5m_pct,
+        momentum_exhaustion_min_buy_sell_ratio,
+        max_buy_more_count,
+        buy_more_cooldown_seconds,
     )
 
 
@@ -576,6 +702,20 @@ def _valid_hhmm(value: str) -> bool:
         )
     except (TypeError, ValueError):
         return False
+
+
+def _valid_hour_list(value: str) -> bool:
+    for item in str(value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            hour = int(item)
+        except ValueError:
+            return False
+        if not 0 <= hour <= 23:
+            return False
+    return True
 
 
 def _payload_bool(value: Any) -> bool:

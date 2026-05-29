@@ -51,32 +51,19 @@ Initialize and run the bot:
 python -m ai_meme_bot.main
 ```
 
-Telegram commands:
+Telegram controls:
 
-- `/start` describes the paper bot and opens the menu.
-- `/menu` reopens the button menu.
-- `/whoami` shows the Telegram user ID for admin-only features.
-- `/status` shows mode, configured AI model, paper balance, and trades.
-- `/settings` shows launch/scout thresholds and hard-exit settings.
-- `/auto_on` allows new paper entries whose AI score meets the active strategy threshold.
-- `/auto_off` stops new entries while open trades remain under review.
-- `/launch_on` and `/launch_off` enable or disable fresh-graduate scanning.
-- `/scout_on` and `/scout_off` enable or disable existing/trending-coin scanning.
-- `/threshold <0-100>` changes the launch buy score threshold, for example `/threshold 25`.
-- `/launch_threshold <0-100>` changes the launch-mode buy threshold.
-- `/scout_threshold <0-100>` changes the scout-mode buy threshold.
-- `/min_trade_size <SOL>` and `/max_trade_size <SOL>` set the dynamic AI
-  position-size range.
-- `/take_profit <pct>` sets the hard take-profit exit.
-- `/stop_loss <pct>` sets the hard stop-loss exit.
-- `/trailing_stop <pct>` sets the hard trailing-stop exit; `0` disables it.
-- `/max_hold <30m|1h|1d>` sets the maximum hold time.
-- `/dynamic_setup` shows whether new entries use dynamic AI trade setup.
-- `/dynamic_setup_on` requires an AI `buy` decision and stores per-trade size/exits.
-- `/dynamic_setup_off` uses static size and hard-exit settings for new entries.
-- `/notify_on` enables Telegram reports.
-- `/notify_off` mutes Telegram reports.
-- `/hermes <task>` runs the opt-in admin workspace operator.
+- Send `/start` once to open the interactive button menu.
+- Use the main buttons for Status, Positions, Trading, Settings, History, and Reports.
+- Trading buttons control auto entries, launch/scout scanners, and dynamic setup.
+- Settings buttons provide presets for launch threshold, dynamic size range, hard
+  exits, and risk gates.
+- Position buttons open each trade and provide manual Take Profit, Cut Loss, and
+  Close actions.
+- Reports buttons mute or resume Telegram notifications.
+- Slash commands still exist as a fallback for advanced/custom values, including
+  `/size_range <min SOL> <max SOL>`, `/max_hold <duration>`, and admin-only
+  `/hermes <task>`.
 
 The last Telegram chat that sends a command becomes the paper report destination.
 The menu provides buttons for status, auto entries, and notification controls.
@@ -108,25 +95,29 @@ See [`ai_meme_bot/.env.example`](ai_meme_bot/.env.example). Important defaults:
 - `MIN_PAIR_AGE_SECONDS=60`
 - `ENTRY_SCORE_THRESHOLD=25`
 - `LAUNCH_ENABLED=1`
-- `SCOUT_ENABLED=1`
+- `SCOUT_ENABLED=0`
 - `LAUNCH_SCORE_THRESHOLD=25`
 - `SCOUT_SCORE_THRESHOLD=70`
 - `TAKE_PROFIT_PCT=18`
 - `STOP_LOSS_PCT=8`
 - `TRAILING_STOP_PCT=7`
 - `MAX_HOLD_SECONDS=3600`
-- `MIN_TRADE_AMOUNT_SOL=0.01`
+- `POSITION_REVIEW_SECONDS=15`
+- `MIN_TRADE_AMOUNT_SOL=0.1`
 - `MAX_TRADE_AMOUNT_SOL=0.3`
+- `BLOCKED_ENTRY_UTC_HOURS=20`
+- `MIN_BUY_SELL_RATIO=1.15`
+- `MIN_VOLUME_LIQUIDITY_RATIO_5M=0.03`
+- `MAX_TOP_HOLDER_SHARE_PCT=35`
 - `SCOUT_MIN_LIQUIDITY_USD=15000`
 - `SCOUT_MIN_VOLUME_5M_USD=500`
 
-The bot has two entry lanes:
+The bot is launch-focused by default:
 
 - Launch mode watches the latest Dexscreener Solana token profiles for fresh
   PumpSwap graduates and uses the lower launch threshold.
-- Scout mode scans GeckoTerminal's Solana trending pools for already-active
-  PumpSwap tokens, applies stricter liquidity/volume/sell-pressure filters, and
-  uses the higher scout threshold.
+- Scout mode remains available for rollback or experiments, but starts disabled
+  because recent paper history showed it added little profit.
 
 Paper trading does not require a Pump.fun RPC, wallet key, or Jito setup. Dexscreener
 provides discovery and pair pricing. `HELIUS_RPC_URL` or `SOLANA_RPC_URL` is optional
@@ -146,10 +137,20 @@ X_BEARER_TOKEN=your-x-api-bearer-token
 X_RECENT_SEARCH_URL=https://api.x.com/2/tweets/search/recent
 X_SEARCH_MINUTES=30
 GECKOTERMINAL_TRENDING_URL=https://api.geckoterminal.com/api/v2/networks/solana/trending_pools
+BIRDEYE_API_KEY=your-birdeye-api-key
+BIRDEYE_WS_URL=wss://public-api.birdeye.so/socket/solana
+REALTIME_PRICE_FEED_ENABLED=0
 ```
 
 Without `X_BEARER_TOKEN`, X trend fields stay unknown and the bot continues with
 Dexscreener, GeckoTerminal, and RPC metrics.
+
+The default exit-protection path is Dexscreener polling every
+`POSITION_REVIEW_SECONDS` seconds, with `HELIUS_RPC_URL` or `SOLANA_RPC_URL`
+enabling holder-concentration enrichment. Birdeye WebSocket support remains in the
+codebase but is disabled by default because WebSocket access is typically a paid
+API feature; set `REALTIME_PRICE_FEED_ENABLED=1` only if you add a usable
+`BIRDEYE_API_KEY`.
 
 `PRIVATE_KEY_BASE58` and `JITO_BLOCK_ENGINE_URL` are reserved for the future live
 trading branch. V1 refuses `REAL` execution even if they are configured.
@@ -169,8 +170,8 @@ correct skips, missed winners, tokens rejected by base filters, and recurring er
 activity. The AI writes three strict rules back into the active prompt and may tune
 paper-mode runtime settings within app limits: entry score threshold, discovery poll
 cadence, paper trade size, exit review cadence, and next reflection wall-clock time.
-The launch threshold starts at 25/100 and scout threshold starts at 70/100. Both can
-be changed without restarting from Telegram.
+The launch threshold starts at 25/100. Scout can still be enabled and tuned from
+Telegram, but it is not shown in normal status output unless enabled.
 
 Dynamic setup is enabled by default. In this mode, a new paper entry needs both a
 positive score at or above the active threshold and an AI `buy` decision. The AI
@@ -178,13 +179,23 @@ also returns a bounded per-trade setup: paper size, stop loss, take-profit targe
 trailing stop, max hold, and rationale. That setup is stored with the trade so later
 hard exits use the original plan. `/dynamic_setup_off` restores the older static
 mode where threshold-qualified entries use the configured trade size and hard-exit
-settings. Hard exits can close positions before AI exit analysis when take-profit,
-stop-loss, trailing-stop, or max-hold rules trigger. Invalid or out-of-range tuning
-output is ignored.
+settings.
+
+Open-position AI reviews now choose between `hold`, `buy_more`, and `sell_now`.
+`buy_more` blends an add-on buy into the existing paper position, records an audit
+row in `trade_additions`, and respects dynamic max size, cooldown, max add count,
+and available paper balance. Hard exits can still close positions before AI review
+when take-profit, stop-loss, trailing-stop, or max-hold rules trigger. Invalid or
+out-of-range tuning output is ignored.
+
+Entry risk gates can reject otherwise approved buys before execution. Defaults
+block the historically weak UTC hour 20, require minimum 5m buy/sell pressure and
+5m volume/liquidity, cap top-holder concentration, and skip exhausted momentum
+unless buy pressure is dominant.
 
 ## Tests
 
 ```bash
-pytest
+.venv/bin/python -m pytest
 ```
 # TradingBotCryptoAI

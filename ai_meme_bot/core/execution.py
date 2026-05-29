@@ -93,6 +93,44 @@ class TradeExecutor:
             entry_amount_sol=trade.entry_amount_sol,
         )
 
+    async def add_to_trade(
+        self, trade: TradeRecord, amount_sol: float, snapshot: TokenSnapshot, reason: str
+    ) -> TradeResult:
+        """Blend an additional paper buy into an existing open position."""
+
+        if self.config.trading_mode != "PAPER":
+            return TradeResult(
+                False,
+                "REAL mode add-on buys are disabled in v1.",
+                trade_id=trade.id,
+                entry_amount_sol=amount_sol,
+            )
+        if snapshot.price_usd <= 0:
+            return TradeResult(
+                False,
+                "Paper add-on needs a positive snapshot price.",
+                trade_id=trade.id,
+                entry_amount_sol=amount_sol,
+            )
+        token_quantity = amount_sol / snapshot.price_usd
+        try:
+            await self.database.add_to_trade(
+                trade.id,
+                snapshot.price_usd,
+                amount_sol,
+                token_quantity,
+                snapshot.stored_payload(),
+                reason,
+            )
+        except DatabaseError as exc:
+            return TradeResult(False, str(exc), trade_id=trade.id, entry_amount_sol=amount_sol)
+        return TradeResult(
+            True,
+            "Added to paper trade.",
+            trade_id=trade.id,
+            entry_amount_sol=amount_sol,
+        )
+
     async def _paper_buy(
         self,
         token_address: str,

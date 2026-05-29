@@ -173,6 +173,32 @@ async def test_dynamic_buy_size_is_clamped_to_strategy_range(tmp_path):
     assert trade.entry_amount_sol == pytest.approx(0.2)
 
 
+@pytest.mark.asyncio
+async def test_buy_more_blends_position_and_records_addition(tmp_path):
+    config = make_config(tmp_path / "trades.db")
+    database = Database(config.db_path)
+    await database.init_db()
+    executor = TradeExecutor(config, database)
+    opened = await executor.execute_trade(
+        "mint-1", "BUY", 0.4, make_snapshot(price=2.0)
+    )
+    trade = await database.get_trade(opened.trade_id)
+
+    added = await executor.add_to_trade(
+        trade, 0.2, make_snapshot(price=1.0), "AI buy-more"
+    )
+    blended = await database.get_trade(opened.trade_id)
+    additions = await database.get_trade_additions(opened.trade_id)
+
+    assert added.success is True
+    assert blended.entry_amount_sol == pytest.approx(0.6)
+    assert blended.token_quantity == pytest.approx(0.4)
+    assert blended.buy_price == pytest.approx(1.5)
+    assert await database.get_balance() == pytest.approx(0.4)
+    assert additions[0]["amount_sol"] == pytest.approx(0.2)
+    assert additions[0]["rationale"] == "AI buy-more"
+
+
 def test_hard_exit_rules_trigger_take_profit_and_stop_loss():
     settings = StrategySettings(
         25,

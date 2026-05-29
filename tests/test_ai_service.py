@@ -138,6 +138,38 @@ async def test_exit_and_reflection_require_structured_decisions():
 
 
 @pytest.mark.asyncio
+async def test_position_review_accepts_buy_more_and_sell_now_actions():
+    service = TradingAIService(
+        FakeBackend(
+            [
+                (
+                    '{"decision": "buy_more", "rationale": "winner accelerating", '
+                    '"add_amount_sol": 5}'
+                ),
+                '{"decision": "sell_now", "rationale": "sell pressure"}',
+            ]
+        )
+    )
+    settings = StrategySettings(
+        25,
+        30.0,
+        0.1,
+        15.0,
+        "00:00",
+        min_trade_amount_sol=0.1,
+        max_trade_amount_sol=0.3,
+    )
+
+    add = await service.evaluate_exit(make_trade(), make_snapshot(), "", settings)
+    close = await service.evaluate_exit(make_trade(), make_snapshot(), "", settings)
+
+    assert add.wants_buy_more is True
+    assert add.add_amount_sol == 0.3
+    assert close.wants_close is True
+    assert close.decision == "sell_now"
+
+
+@pytest.mark.asyncio
 async def test_reflection_accepts_only_bounded_strategy_settings():
     evidence = ReflectionEvidence(recent_analyses=[{"token_address": "mint-1"}])
     service = TradingAIService(

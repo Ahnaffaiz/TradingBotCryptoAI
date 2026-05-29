@@ -22,8 +22,9 @@ from ai_meme_bot.agent.tools import TradingTools
 from ai_meme_bot.config import AppConfig
 from ai_meme_bot.core.database import Database
 from ai_meme_bot.core.execution import TradeExecutor
+from ai_meme_bot.core.price_feed import BirdeyePriceFeed, PriceTick
 from ai_meme_bot.core.tracker import TokenTracker
-from ai_meme_bot.models import ExitDecision, TradePlan
+from ai_meme_bot.models import ExitDecision, TokenSnapshot, TradePlan, TradeResult
 
 
 LOGGER = logging.getLogger(__name__)
@@ -68,6 +69,28 @@ async def run_discovery_loop(
                 not settings.dynamic_setup_enabled
                 or (evaluation.wants_buy and evaluation.trade_plan is not None)
             )
+            risk_rejection = (
+                _entry_risk_rejection(snapshot, settings)
+                if threshold_approved and dynamic_approved
+                else None
+            )
+            if risk_rejection is not None:
+                await database.add_activity(
+                    "entry_risk_reject",
+                    risk_rejection,
+                    snapshot.token_address,
+                    {
+                        "analysis_id": analysis_id,
+                        "pair_address": snapshot.pair_address,
+                        "strategy": snapshot.strategy,
+                    },
+                )
+                LOGGER.info(
+                    "Entry risk gate rejected token=%s reason=%s",
+                    snapshot.token_address,
+                    risk_rejection,
+                )
+                continue
             if threshold_approved and dynamic_approved:
                 result = await _trigger_buy(tools, snapshot, evaluation)
                 if result.success:
@@ -140,7 +163,7 @@ async def run_position_review_loop(
                     trade, snapshot, settings, high_watermarks[trade.id]
                 )
                 if hard_exit_reason is not None:
-                    decision = ExitDecision("close", hard_exit_reason)
+                    decision = ExitDecision("sell_now", hard_exit_reason)
                     result = await executor.close_trade(trade, snapshot, hard_exit_reason)
                     high_watermarks.pop(trade.id, None)
                     await database.add_activity(
@@ -156,15 +179,18 @@ async def run_position_review_loop(
                     )
                     await notifier.sell_result(trade, snapshot, decision, result)
                     continue
-                decision = await ai_service.evaluate_exit(trade, snapshot, rules)
+                decision = await _evaluate_position(
+                    ai_service, trade, snapshot, rules, settings
+                )
                 await database.add_activity(
-                    "exit_analysis",
+                    "position_analysis",
                     decision.decision,
                     trade.token_address,
                     {
                         "trade_id": trade.id,
                         "rationale": decision.rationale,
                         "price_usd": snapshot.price_usd,
+                        "add_amount_sol": decision.add_amount_sol,
                     },
                 )
                 await notifier.exit_analysis(trade, snapshot, decision)
@@ -184,6 +210,21 @@ async def run_position_review_loop(
                         result.success,
                         result.message,
                     )
+                elif decision.wants_buy_more:
+                    result = await _trigger_buy_more(
+                        database, executor, trade, snapshot, decision, settings
+                    )
+                    await database.add_activity(
+                        "paper_buy_more" if result.success else "paper_buy_more_rejected",
+                        result.message,
+                        trade.token_address,
+                        {
+                            "trade_id": trade.id,
+                            "entry_amount_sol": result.entry_amount_sol,
+                            "reason": decision.rationale,
+                        },
+                    )
+                    await notifier.buy_more_result(trade, snapshot, decision, result)
             except Exception as exc:
                 LOGGER.exception("Exit pipeline failed for trade=%s", trade.id)
                 await database.add_activity(
@@ -198,6 +239,87 @@ async def run_position_review_loop(
                 )
         settings = await database.get_strategy_settings(config.strategy_defaults)
         await asyncio.sleep(settings.position_review_seconds)
+
+
+async def run_realtime_exit_loop(
+    database: Database,
+    executor: TradeExecutor,
+    config: AppConfig,
+    notifier: PaperNotifier,
+    price_feed: Any | None = None,
+) -> None:
+    """Close open trades quickly from Birdeye WebSocket price ticks."""
+
+    if price_feed is None:
+        if not config.realtime_price_feed_enabled or not config.birdeye_api_key:
+            return
+        price_feed = BirdeyePriceFeed(config.birdeye_api_key, config.birdeye_ws_url)
+    high_watermarks: dict[int, float] = {}
+    while True:
+        settings = await database.get_strategy_settings(config.strategy_defaults)
+        trades = await database.get_open_trades()
+        address_to_trade = {
+            pair_address: trade
+            for trade in trades
+            if (pair_address := _pair_address_for_trade(trade))
+        }
+        if not address_to_trade:
+            await asyncio.sleep(max(5.0, min(30.0, settings.position_review_seconds)))
+            continue
+        try:
+            async with asyncio.timeout(60):
+                async for tick in price_feed.stream_prices(address_to_trade.keys()):
+                    trade = address_to_trade.get(tick.address)
+                    if trade is None:
+                        continue
+                    current_trade = await database.get_trade(trade.id)
+                    if current_trade is None or current_trade.status != "OPEN":
+                        continue
+                    snapshot = _snapshot_from_tick(current_trade, tick)
+                    high_watermarks[current_trade.id] = max(
+                        high_watermarks.get(current_trade.id, current_trade.buy_price),
+                        snapshot.price_usd,
+                    )
+                    settings = await database.get_strategy_settings(
+                        config.strategy_defaults
+                    )
+                    hard_exit_reason = _hard_exit_reason(
+                        current_trade,
+                        snapshot,
+                        settings,
+                        high_watermarks[current_trade.id],
+                    )
+                    if hard_exit_reason is None:
+                        continue
+                    decision = ExitDecision("sell_now", hard_exit_reason)
+                    result = await executor.close_trade(
+                        current_trade, snapshot, hard_exit_reason
+                    )
+                    high_watermarks.pop(current_trade.id, None)
+                    await database.add_activity(
+                        "paper_sell" if result.success else "paper_sell_rejected",
+                        result.message,
+                        current_trade.token_address,
+                        {
+                            "trade_id": current_trade.id,
+                            "pnl": result.pnl,
+                            "exit_type": "realtime_hard_rule",
+                            "reason": hard_exit_reason,
+                            "price_feed": "birdeye",
+                        },
+                    )
+                    await notifier.sell_result(current_trade, snapshot, decision, result)
+        except asyncio.TimeoutError:
+            continue
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.exception("Realtime exit monitor failed")
+            await database.add_activity(
+                "error", str(exc), payload={"stage": "realtime exit"}
+            )
+            await notifier.error("realtime exit", str(exc))
+            await asyncio.sleep(max(5.0, settings.position_review_seconds))
 
 
 def _entry_threshold(settings: Any, strategy: str) -> int:
@@ -222,6 +344,150 @@ async def _trigger_buy(tools: Any, snapshot: Any, evaluation: Any) -> Any:
     if len(signature.parameters) >= 3:
         return await tools.trigger_buy(snapshot.token_address, snapshot, evaluation)
     return await tools.trigger_buy(snapshot.token_address, snapshot)
+
+
+async def _evaluate_position(
+    ai_service: Any, trade: Any, snapshot: Any, rules: str, settings: Any
+) -> Any:
+    signature = inspect.signature(ai_service.evaluate_exit)
+    if len(signature.parameters) >= 4:
+        return await ai_service.evaluate_exit(trade, snapshot, rules, settings)
+    return await ai_service.evaluate_exit(trade, snapshot, rules)
+
+
+async def _trigger_buy_more(
+    database: Database,
+    executor: TradeExecutor,
+    trade: Any,
+    snapshot: TokenSnapshot,
+    decision: ExitDecision,
+    settings: Any,
+) -> TradeResult:
+    reason = await _buy_more_rejection(database, trade, settings)
+    requested_amount = decision.add_amount_sol
+    min_size, max_size = settings.trade_size_bounds()
+    amount = max(min_size, min(float(requested_amount or min_size), max_size))
+    remaining = max(0.0, float(settings.max_trade_amount_sol) - trade.entry_amount_sol)
+    balance = await database.get_balance()
+    amount = min(amount, remaining, balance)
+    if reason is None and amount < min_size:
+        reason = (
+            "buy-more amount below minimum after balance and max-position guardrails"
+        )
+    if reason is not None:
+        return TradeResult(
+            False,
+            "Buy-more rejected: {0}.".format(reason),
+            trade_id=trade.id,
+            entry_amount_sol=amount,
+        )
+    return await executor.add_to_trade(
+        trade,
+        round(amount, 6),
+        snapshot,
+        decision.rationale or "AI buy-more",
+    )
+
+
+async def _buy_more_rejection(
+    database: Database, trade: Any, settings: Any
+) -> str | None:
+    additions = await database.get_trade_additions(trade.id)
+    if len(additions) >= int(settings.max_buy_more_count):
+        return "max buy-more count reached"
+    min_size, _max_size = settings.trade_size_bounds()
+    remaining = float(settings.max_trade_amount_sol) - float(trade.entry_amount_sol)
+    if remaining < min_size:
+        return "position is already at the dynamic max size"
+    balance = await database.get_balance()
+    if balance < min_size:
+        return "paper balance is below the minimum dynamic trade size"
+    if additions and float(settings.buy_more_cooldown_seconds) > 0:
+        created_at = _parse_iso_datetime(str(additions[0].get("created_at", "")))
+        if created_at is not None:
+            age = (datetime.now(timezone.utc) - created_at).total_seconds()
+            if age < float(settings.buy_more_cooldown_seconds):
+                return "buy-more cooldown is still active"
+    return None
+
+
+def _entry_risk_rejection(
+    snapshot: TokenSnapshot, settings: Any, now: datetime | None = None
+) -> str | None:
+    current = now or datetime.now(timezone.utc)
+    if current.astimezone(timezone.utc).hour in settings.blocked_hours():
+        return "UTC hour {0} is blocked for new entries".format(current.hour)
+    ratio = _buy_sell_ratio(snapshot)
+    if ratio is not None and ratio < float(settings.min_buy_sell_ratio):
+        return "5m buy/sell ratio {0:.2f} below {1:g}".format(
+            ratio, settings.min_buy_sell_ratio
+        )
+    if snapshot.liquidity_usd > 0:
+        volume_liquidity = snapshot.volume_5m_usd / snapshot.liquidity_usd
+        if volume_liquidity < float(settings.min_volume_liquidity_ratio_5m):
+            return "5m volume/liquidity {0:.4f} below {1:g}".format(
+                volume_liquidity, settings.min_volume_liquidity_ratio_5m
+            )
+    if (
+        snapshot.top_holder_share_pct is not None
+        and snapshot.top_holder_share_pct > float(settings.max_top_holder_share_pct)
+    ):
+        return "top holders {0:g}% above {1:g}%".format(
+            snapshot.top_holder_share_pct, settings.max_top_holder_share_pct
+        )
+    if (
+        snapshot.price_change_5m_pct is not None
+        and snapshot.price_change_5m_pct > float(settings.max_momentum_5m_pct)
+        and (
+            ratio is None
+            or ratio < float(settings.momentum_exhaustion_min_buy_sell_ratio)
+        )
+    ):
+        return "5m momentum {0:g}% is exhausted without dominant buy pressure".format(
+            snapshot.price_change_5m_pct
+        )
+    return None
+
+
+def _buy_sell_ratio(snapshot: TokenSnapshot) -> float | None:
+    if snapshot.buys_5m is None or snapshot.sells_5m is None:
+        return None
+    if snapshot.sells_5m <= 0:
+        return float(snapshot.buys_5m) if snapshot.buys_5m > 0 else None
+    return float(snapshot.buys_5m) / float(snapshot.sells_5m)
+
+
+def _pair_address_for_trade(trade: Any) -> str | None:
+    try:
+        payload = json.loads(trade.entry_snapshot_json or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        return None
+    pair_address = payload.get("pair_address")
+    return str(pair_address).strip() if pair_address else None
+
+
+def _snapshot_from_tick(trade: Any, tick: PriceTick) -> TokenSnapshot:
+    try:
+        payload = json.loads(trade.entry_snapshot_json or "{}")
+    except (TypeError, ValueError):
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
+    payload = dict(payload)
+    payload["price_usd"] = tick.price_usd
+    payload["pair_address"] = payload.get("pair_address") or tick.address
+    payload["token_address"] = payload.get("token_address") or trade.token_address
+    payload["liquidity_usd"] = float(payload.get("liquidity_usd") or 0.0)
+    payload["volume_5m_usd"] = float(payload.get("volume_5m_usd") or 0.0)
+    payload["pair_age_seconds"] = float(payload.get("pair_age_seconds") or 0.0)
+    payload["raw_context"] = dict(payload.get("raw_context") or {})
+    payload["raw_context"]["birdeye_tick"] = tick.raw_payload
+    valid_keys = set(TokenSnapshot.__dataclass_fields__)
+    return TokenSnapshot(
+        **{key: value for key, value in payload.items() if key in valid_keys}
+    )
 
 
 def _hard_exit_reason(
@@ -503,6 +769,13 @@ async def run(config: AppConfig) -> None:
                 name="outcomes",
             ),
         ]
+        if config.realtime_price_feed_enabled and config.birdeye_api_key:
+            tasks.append(
+                asyncio.create_task(
+                    run_realtime_exit_loop(database, executor, config, notifier),
+                    name="realtime-exits",
+                )
+            )
         try:
             await asyncio.gather(*tasks)
         finally:

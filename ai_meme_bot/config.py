@@ -56,6 +56,26 @@ def _id_set_env(name: str) -> frozenset[int]:
     return frozenset(values)
 
 
+def _hour_list_env(name: str, default: str) -> str:
+    raw_value = os.getenv(name)
+    value = default if raw_value is None or raw_value.strip() == "" else raw_value
+    hours = []
+    for item in value.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            hour = int(item)
+        except ValueError as exc:
+            raise ConfigError(
+                "{0} must contain comma-separated UTC hours from 0 to 23.".format(name)
+            ) from exc
+        if hour < 0 or hour > 23:
+            raise ConfigError("{0} hours must be between 0 and 23.".format(name))
+        hours.append(str(hour))
+    return ",".join(hours)
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """Validated runtime settings for the bot."""
@@ -77,6 +97,9 @@ class AppConfig:
     x_recent_search_url: str
     x_search_minutes: int
     geckoterminal_trending_url: str
+    birdeye_api_key: Optional[str]
+    birdeye_ws_url: str
+    realtime_price_feed_enabled: bool
     tracker_poll_seconds: float
     position_review_seconds: float
     min_liquidity_usd: float
@@ -94,8 +117,16 @@ class AppConfig:
     scout_min_volume_5m_usd: float
     reflection_time: str
     reflection_timezone: str
-    min_trade_amount_sol: float = 0.01
-    max_trade_amount_sol: float = 2.0
+    min_trade_amount_sol: float = 0.1
+    max_trade_amount_sol: float = 0.3
+    blocked_entry_utc_hours: str = "20"
+    min_buy_sell_ratio: float = 1.15
+    min_volume_liquidity_ratio_5m: float = 0.03
+    max_top_holder_share_pct: float = 35.0
+    max_momentum_5m_pct: float = 80.0
+    momentum_exhaustion_min_buy_sell_ratio: float = 2.0
+    max_buy_more_count: int = 2
+    buy_more_cooldown_seconds: float = 120.0
 
     @classmethod
     def from_env(
@@ -113,10 +144,8 @@ class AppConfig:
         base_trade_amount = _float_env("BASE_TRADE_AMOUNT", 0.1)
         if base_trade_amount <= 0:
             raise ConfigError("BASE_TRADE_AMOUNT must be greater than zero.")
-        min_trade_amount_sol = _float_env("MIN_TRADE_AMOUNT_SOL", 0.01)
-        max_trade_amount_sol = _float_env(
-            "MAX_TRADE_AMOUNT_SOL", min(2.0, max(base_trade_amount * 3.0, 0.01))
-        )
+        min_trade_amount_sol = _float_env("MIN_TRADE_AMOUNT_SOL", 0.1)
+        max_trade_amount_sol = _float_env("MAX_TRADE_AMOUNT_SOL", 0.3)
         if min_trade_amount_sol < 0.01 or min_trade_amount_sol > 2.0:
             raise ConfigError("MIN_TRADE_AMOUNT_SOL must be between 0.01 and 2.0.")
         if max_trade_amount_sol < 0.01 or max_trade_amount_sol > 2.0:
@@ -175,6 +204,33 @@ class AppConfig:
             raise ConfigError("TRAILING_STOP_PCT must be zero or greater.")
         if max_hold_seconds <= 0:
             raise ConfigError("MAX_HOLD_SECONDS must be greater than zero.")
+        min_buy_sell_ratio = _float_env("MIN_BUY_SELL_RATIO", 1.15)
+        min_volume_liquidity_ratio_5m = _float_env(
+            "MIN_VOLUME_LIQUIDITY_RATIO_5M", 0.03
+        )
+        max_top_holder_share_pct = _float_env("MAX_TOP_HOLDER_SHARE_PCT", 35.0)
+        max_momentum_5m_pct = _float_env("MAX_MOMENTUM_5M_PCT", 80.0)
+        momentum_exhaustion_min_buy_sell_ratio = _float_env(
+            "MOMENTUM_EXHAUSTION_MIN_BUY_SELL_RATIO", 2.0
+        )
+        max_buy_more_count = _int_env("MAX_BUY_MORE_COUNT", 2)
+        buy_more_cooldown_seconds = _float_env("BUY_MORE_COOLDOWN_SECONDS", 120.0)
+        if min_buy_sell_ratio < 0:
+            raise ConfigError("MIN_BUY_SELL_RATIO must be zero or greater.")
+        if min_volume_liquidity_ratio_5m < 0:
+            raise ConfigError("MIN_VOLUME_LIQUIDITY_RATIO_5M must be zero or greater.")
+        if not 0 <= max_top_holder_share_pct <= 100:
+            raise ConfigError("MAX_TOP_HOLDER_SHARE_PCT must be between 0 and 100.")
+        if max_momentum_5m_pct < 0:
+            raise ConfigError("MAX_MOMENTUM_5M_PCT must be zero or greater.")
+        if momentum_exhaustion_min_buy_sell_ratio < 0:
+            raise ConfigError(
+                "MOMENTUM_EXHAUSTION_MIN_BUY_SELL_RATIO must be zero or greater."
+            )
+        if max_buy_more_count < 0:
+            raise ConfigError("MAX_BUY_MORE_COUNT must be zero or greater.")
+        if buy_more_cooldown_seconds < 0:
+            raise ConfigError("BUY_MORE_COOLDOWN_SECONDS must be zero or greater.")
 
         return cls(
             trading_mode=trading_mode,
@@ -205,13 +261,19 @@ class AppConfig:
                 "GECKOTERMINAL_TRENDING_URL",
                 "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools",
             ).strip(),
+            birdeye_api_key=os.getenv("BIRDEYE_API_KEY", "").strip() or None,
+            birdeye_ws_url=os.getenv(
+                "BIRDEYE_WS_URL",
+                "wss://public-api.birdeye.so/socket/solana",
+            ).strip(),
+            realtime_price_feed_enabled=_bool_env("REALTIME_PRICE_FEED_ENABLED", False),
             tracker_poll_seconds=_float_env("TRACKER_POLL_SECONDS", 30.0),
-            position_review_seconds=_float_env("POSITION_REVIEW_SECONDS", 45.0),
+            position_review_seconds=_float_env("POSITION_REVIEW_SECONDS", 15.0),
             min_liquidity_usd=_float_env("MIN_LIQUIDITY_USD", 10000.0),
             min_pair_age_seconds=_int_env("MIN_PAIR_AGE_SECONDS", 60),
             entry_score_threshold=entry_threshold,
             launch_enabled=_bool_env("LAUNCH_ENABLED", True),
-            scout_enabled=_bool_env("SCOUT_ENABLED", True),
+            scout_enabled=_bool_env("SCOUT_ENABLED", False),
             launch_score_threshold=launch_threshold,
             scout_score_threshold=scout_threshold,
             take_profit_pct=take_profit_pct,
@@ -224,6 +286,16 @@ class AppConfig:
             reflection_timezone=os.getenv("REFLECTION_TIMEZONE", "Asia/Jakarta").strip(),
             min_trade_amount_sol=min_trade_amount_sol,
             max_trade_amount_sol=max_trade_amount_sol,
+            blocked_entry_utc_hours=_hour_list_env("BLOCKED_ENTRY_UTC_HOURS", "20"),
+            min_buy_sell_ratio=min_buy_sell_ratio,
+            min_volume_liquidity_ratio_5m=min_volume_liquidity_ratio_5m,
+            max_top_holder_share_pct=max_top_holder_share_pct,
+            max_momentum_5m_pct=max_momentum_5m_pct,
+            momentum_exhaustion_min_buy_sell_ratio=(
+                momentum_exhaustion_min_buy_sell_ratio
+            ),
+            max_buy_more_count=max_buy_more_count,
+            buy_more_cooldown_seconds=buy_more_cooldown_seconds,
         )
 
     @property
@@ -255,4 +327,14 @@ class AppConfig:
             dynamic_setup_enabled=True,
             min_trade_amount_sol=self.min_trade_amount_sol,
             max_trade_amount_sol=self.max_trade_amount_sol,
+            blocked_entry_utc_hours=self.blocked_entry_utc_hours,
+            min_buy_sell_ratio=self.min_buy_sell_ratio,
+            min_volume_liquidity_ratio_5m=self.min_volume_liquidity_ratio_5m,
+            max_top_holder_share_pct=self.max_top_holder_share_pct,
+            max_momentum_5m_pct=self.max_momentum_5m_pct,
+            momentum_exhaustion_min_buy_sell_ratio=(
+                self.momentum_exhaustion_min_buy_sell_ratio
+            ),
+            max_buy_more_count=self.max_buy_more_count,
+            buy_more_cooldown_seconds=self.buy_more_cooldown_seconds,
         )

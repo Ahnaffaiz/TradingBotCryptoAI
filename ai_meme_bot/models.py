@@ -29,6 +29,9 @@ class TokenSnapshot:
     liquidity_usd: float
     volume_5m_usd: float
     pair_age_seconds: float
+    token_name: Optional[str] = None
+    token_symbol: Optional[str] = None
+    token_logo_url: Optional[str] = None
     dex_id: str = "pumpswap"
     pair_created_at_ms: Optional[int] = None
     top_holder_share_pct: Optional[float] = None
@@ -50,6 +53,9 @@ class TokenSnapshot:
 
         return {
             "token_address": self.token_address,
+            "token_name": self.token_name,
+            "token_symbol": self.token_symbol,
+            "token_logo_url": self.token_logo_url,
             "pair_address": self.pair_address,
             "dex_id": self.dex_id,
             "price_usd": self.price_usd,
@@ -107,14 +113,19 @@ class TokenEvaluation:
 
 @dataclass
 class ExitDecision:
-    """AI review result for an open paper trade."""
+    """AI position review result for an open paper trade."""
 
     decision: str = "hold"
     rationale: str = "AI exit evaluation unavailable."
+    add_amount_sol: Optional[float] = None
 
     @property
     def wants_close(self) -> bool:
-        return self.decision.lower() == "close"
+        return self.decision.lower() in {"close", "sell_now"}
+
+    @property
+    def wants_buy_more(self) -> bool:
+        return self.decision.lower() == "buy_more"
 
 
 @dataclass
@@ -148,8 +159,16 @@ class StrategySettings:
     scout_min_liquidity_usd: float = 15000.0
     scout_min_volume_5m_usd: float = 500.0
     dynamic_setup_enabled: bool = True
-    min_trade_amount_sol: float = 0.01
-    max_trade_amount_sol: float = 2.0
+    min_trade_amount_sol: float = 0.1
+    max_trade_amount_sol: float = 0.3
+    blocked_entry_utc_hours: str = "20"
+    min_buy_sell_ratio: float = 1.15
+    min_volume_liquidity_ratio_5m: float = 0.03
+    max_top_holder_share_pct: float = 35.0
+    max_momentum_5m_pct: float = 80.0
+    momentum_exhaustion_min_buy_sell_ratio: float = 2.0
+    max_buy_more_count: int = 2
+    buy_more_cooldown_seconds: float = 120.0
 
     def prompt_payload(self) -> Dict[str, Any]:
         return asdict(self)
@@ -160,6 +179,22 @@ class StrategySettings:
         minimum = max(0.01, float(self.min_trade_amount_sol))
         maximum = max(minimum, min(2.0, float(self.max_trade_amount_sol)))
         return minimum, maximum
+
+    def blocked_hours(self) -> set[int]:
+        """Return configured UTC entry block hours."""
+
+        hours = set()
+        for item in str(self.blocked_entry_utc_hours or "").split(","):
+            item = item.strip()
+            if not item:
+                continue
+            try:
+                hour = int(item)
+            except ValueError:
+                continue
+            if 0 <= hour <= 23:
+                hours.add(hour)
+        return hours
 
 
 @dataclass

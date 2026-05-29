@@ -154,6 +154,8 @@ def test_pumpswap_filters_and_normalizes_snapshot(tmp_path):
         {
             "dexId": "pumpswap",
             "pairAddress": "eligible",
+            "baseToken": {"name": "Mint One", "symbol": "MINT"},
+            "info": {"imageUrl": "https://cdn.example/mint.png"},
             "priceUsd": "0.25",
                     "liquidity": {"usd": 25000},
                     "volume": {"m5": 700},
@@ -174,6 +176,9 @@ def test_pumpswap_filters_and_normalizes_snapshot(tmp_path):
     assert snapshot.price_change_1h_pct == -4.2
     assert snapshot.buys_5m == 18
     assert snapshot.sells_5m == 9
+    assert snapshot.token_name == "Mint One"
+    assert snapshot.token_symbol == "MINT"
+    assert snapshot.token_logo_url == "https://cdn.example/mint.png"
 
 
 def test_top_holder_share_uses_largest_accounts_and_supply():

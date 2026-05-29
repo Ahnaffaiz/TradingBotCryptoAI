@@ -4,7 +4,6 @@ from ai_meme_bot.agent.hermes_bot import TelegramPaperNotifier, TelegramTradingB
 from ai_meme_bot.core.database import Database
 from ai_meme_bot.models import (
     ExitDecision,
-    StrategySettings,
     TokenEvaluation,
     TradeRecord,
     TradeResult,
@@ -15,18 +14,41 @@ from tests.helpers import make_config, make_snapshot
 class FakeMessage:
     def __init__(self):
         self.replies = []
+        self.edits = []
 
     async def reply_text(self, text, **kwargs):
         self.replies.append((text, kwargs))
 
+    async def edit_text(self, text, **kwargs):
+        self.edits.append((text, kwargs))
+
 
 class FakeUpdate:
-    def __init__(self, user_id=5):
+    def __init__(self, user_id=5, callback_data=None):
         self.effective_message = FakeMessage()
         self.effective_chat = type("FakeChat", (), {"id": 94721})()
         self.effective_user = type(
             "FakeUser", (), {"id": user_id, "username": "admin-user"}
         )()
+        self.callback_query = (
+            FakeCallbackQuery(callback_data, self.effective_message)
+            if callback_data is not None
+            else None
+        )
+
+
+class FakeCallbackQuery:
+    def __init__(self, data, message):
+        self.data = data
+        self.message = message
+        self.answered = False
+        self.edits = []
+
+    async def answer(self):
+        self.answered = True
+
+    async def edit_message_text(self, text, **kwargs):
+        self.edits.append((text, kwargs))
 
 
 class FakeContext:
@@ -46,9 +68,18 @@ class FakeOperator:
 class FakeTelegramBot:
     def __init__(self):
         self.messages = []
+        self.photos = []
 
     async def send_message(self, chat_id, text, **kwargs):
         self.messages.append((chat_id, text, kwargs))
+
+    async def send_photo(self, chat_id, photo, **kwargs):
+        self.photos.append((chat_id, photo, kwargs))
+
+
+class FailingPhotoTelegramBot(FakeTelegramBot):
+    async def send_photo(self, chat_id, photo, **kwargs):
+        raise RuntimeError("photo failed")
 
 
 @pytest.mark.asyncio
@@ -67,7 +98,8 @@ async def test_status_redacts_api_key_and_auto_handlers_toggle_state(tmp_path):
     assert "secret-key" not in status
     assert "Auto entries:</b> 🟢 ON" in status
     assert "Reports:</b> 🔔 ON in this chat" in status
-    assert "Thresholds:</b> launch ≥ 25 | scout ≥ 70" in status
+    assert "Launch threshold:</b> ≥ 25" in status
+    assert "Scout scanner" not in status
     assert (
         "Trade size:</b> static 1.000000 SOL | dynamic 0.010000..2.000000 SOL"
         in status
@@ -91,10 +123,12 @@ async def test_threshold_command_updates_live_strategy_settings(tmp_path):
     await bot.threshold(update, FakeContext(["25/100"]))
     await bot.threshold(update, FakeContext(["101"]))
 
-    assert await database.get_strategy_settings(config.strategy_defaults) == (
-        StrategySettings(25, 0.01, 1.0, 0.01, "00:00")
-    )
-    assert "Use <code>/threshold 25</code>" in update.effective_message.replies[0][0]
+    settings = await database.get_strategy_settings(config.strategy_defaults)
+    assert settings.entry_score_threshold == 25
+    assert settings.launch_score_threshold == 25
+    assert settings.base_trade_amount == 1.0
+    assert settings.tracker_poll_seconds == 0.01
+    assert "Use the Settings buttons" in update.effective_message.replies[0][0]
     assert "Launch threshold updated" in update.effective_message.replies[1][0]
     assert "Invalid threshold" in update.effective_message.replies[2][0]
 
@@ -132,12 +166,60 @@ async def test_trade_size_bound_commands_update_strategy_settings(tmp_path):
     await bot.max_trade_size(update, FakeContext(["0.25"]))
     settings = await database.get_strategy_settings(config.strategy_defaults)
     await bot.min_trade_size(update, FakeContext(["0.3"]))
+    await bot.size_range(update, FakeContext(["0.1", "0.3"]))
+    ranged = await database.get_strategy_settings(config.strategy_defaults)
 
     assert settings.min_trade_amount_sol == 0.05
     assert settings.max_trade_amount_sol == 0.25
+    assert ranged.min_trade_amount_sol == 0.1
+    assert ranged.max_trade_amount_sol == 0.3
     assert "Minimum trade size updated" in update.effective_message.replies[0][0]
     assert "Maximum trade size updated" in update.effective_message.replies[1][0]
     assert "Invalid range" in update.effective_message.replies[2][0]
+    assert "Dynamic size range updated" in update.effective_message.replies[3][0]
+
+
+@pytest.mark.asyncio
+async def test_inline_buttons_update_trading_and_settings(tmp_path):
+    config = make_config(tmp_path / "trades.db")
+    database = Database(config.db_path)
+    await database.init_db()
+    bot = TelegramTradingBot(config, database)
+
+    auto_update = FakeUpdate(callback_data="bot:auto:on")
+    threshold_update = FakeUpdate(callback_data="bot:threshold:35")
+    size_update = FakeUpdate(callback_data="bot:size:0.1:0.3")
+
+    await bot.button(auto_update, None)
+    await bot.button(threshold_update, None)
+    await bot.button(size_update, None)
+    settings = await database.get_strategy_settings(config.strategy_defaults)
+
+    assert auto_update.callback_query.answered is True
+    assert await database.get_auto_trading() is True
+    assert settings.launch_score_threshold == 35
+    assert settings.min_trade_amount_sol == 0.1
+    assert settings.max_trade_amount_sol == 0.3
+    assert "Auto entries enabled" in auto_update.callback_query.edits[0][0]
+    assert "Launch threshold updated" in threshold_update.callback_query.edits[0][0]
+    assert "Dynamic size range updated" in size_update.callback_query.edits[0][0]
+
+
+@pytest.mark.asyncio
+async def test_inline_menu_renders_button_markup(tmp_path):
+    config = make_config(tmp_path / "trades.db")
+    database = Database(config.db_path)
+    await database.init_db()
+    bot = TelegramTradingBot(config, database)
+    update = FakeUpdate(callback_data="bot:settings")
+
+    await bot.button(update, None)
+
+    rendered, kwargs = update.callback_query.edits[0]
+    assert "Strategy Settings" in rendered
+    assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data.startswith(
+        "bot:threshold:"
+    )
 
 
 @pytest.mark.asyncio
@@ -158,12 +240,32 @@ async def test_telegram_notifier_sends_analysis_and_trade_reports(tmp_path):
         TradeResult(True, "Opened paper trade.", trade_id=9, entry_amount_sol=0.25),
     )
 
-    assert [chat_id for chat_id, _text, _kwargs in telegram_bot.messages] == [1234, 1234]
+    assert [chat_id for chat_id, _photo, _kwargs in telegram_bot.photos] == [1234]
+    assert telegram_bot.photos[0][1] == "https://cdn.example/mint.png"
+    assert "Paper Entry Analysis" in telegram_bot.photos[0][2]["caption"]
+    assert "Mint One (MINT)" in telegram_bot.photos[0][2]["caption"]
+    assert [chat_id for chat_id, _text, _kwargs in telegram_bot.messages] == [1234]
+    assert "Paper Buy Opened" in telegram_bot.messages[0][1]
+    assert "Entry size:</b> 0.250000 SOL" in telegram_bot.messages[0][1]
+    assert telegram_bot.photos[0][2]["parse_mode"] == "HTML"
+
+
+@pytest.mark.asyncio
+async def test_telegram_notifier_falls_back_when_logo_photo_fails(tmp_path):
+    config = make_config(tmp_path / "trades.db")
+    database = Database(config.db_path)
+    await database.init_db()
+    await database.set_notification_chat_id(1234)
+    telegram_bot = FailingPhotoTelegramBot()
+    notifier = TelegramPaperNotifier(database, telegram_bot)
+
+    await notifier.entry_analysis(
+        make_snapshot(),
+        TokenEvaluation(score=92, decision="buy", rationale="liquid enough"),
+    )
+
+    assert len(telegram_bot.messages) == 1
     assert "Paper Entry Analysis" in telegram_bot.messages[0][1]
-    assert "liquid enough" in telegram_bot.messages[0][1]
-    assert "Paper Buy Opened" in telegram_bot.messages[1][1]
-    assert "Entry size:</b> 0.250000 SOL" in telegram_bot.messages[1][1]
-    assert telegram_bot.messages[0][2]["parse_mode"] == "HTML"
 
 
 def test_sell_result_displays_entry_size():
@@ -195,6 +297,8 @@ def test_sell_result_displays_entry_size():
     )
 
     assert "Entry size:</b> 0.250000 SOL" in rendered
+    assert "Sell price:</b> $1.2" in rendered
+    assert "PnL:</b> +0.050000 SOL" in rendered
 
 
 @pytest.mark.asyncio
@@ -216,7 +320,8 @@ async def test_notification_switch_mutes_and_resumes_reports(tmp_path):
     await notifier.entry_analysis(snapshot, evaluation)
 
     assert await database.get_notifications_enabled() is True
-    assert len(telegram_bot.messages) == 1
+    assert len(telegram_bot.photos) == 1
+    assert len(telegram_bot.messages) == 0
     assert "Reports muted" in update.effective_message.replies[0][0]
     assert "Reports enabled" in update.effective_message.replies[1][0]
 

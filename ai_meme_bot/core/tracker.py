@@ -263,6 +263,8 @@ class TokenTracker:
         pair_age = self._pair_age_seconds(pair_created_at)
         price = _as_float(pair.get("priceUsd"))
         liquidity = _as_float((pair.get("liquidity") or {}).get("usd"))
+        base_token = pair.get("baseToken") or {}
+        info = pair.get("info") or {}
         if price <= 0:
             raise TrackerError("Dexscreener pair is missing a positive price.")
         return TokenSnapshot(
@@ -272,6 +274,9 @@ class TokenTracker:
             liquidity_usd=liquidity,
             volume_5m_usd=_as_float((pair.get("volume") or {}).get("m5")),
             pair_age_seconds=pair_age,
+            token_name=_nullable_text(base_token.get("name")),
+            token_symbol=_nullable_text(base_token.get("symbol")),
+            token_logo_url=_nullable_text(info.get("imageUrl")),
             dex_id=str(pair.get("dexId", "")),
             pair_created_at_ms=int(pair_created_at) if pair_created_at else None,
             price_change_5m_pct=_nullable_float((pair.get("priceChange") or {}).get("m5")),
@@ -520,6 +525,13 @@ def _nullable_int(value: Any) -> Optional[int]:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _nullable_text(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _x_sentiment_hint(posts: Sequence[Dict[str, Any]]) -> str:

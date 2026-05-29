@@ -83,6 +83,21 @@ class Database:
                 ON trade_history(token_address)
                 WHERE status = 'OPEN';
 
+                CREATE TABLE IF NOT EXISTS trade_additions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    trade_id INTEGER NOT NULL,
+                    price_usd REAL NOT NULL,
+                    amount_sol REAL NOT NULL,
+                    token_quantity REAL NOT NULL,
+                    snapshot_json TEXT NOT NULL,
+                    rationale TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(trade_id) REFERENCES trade_history(id)
+                );
+
+                CREATE INDEX IF NOT EXISTS trade_additions_trade_id_idx
+                ON trade_additions(trade_id, created_at);
+
                 CREATE TABLE IF NOT EXISTS ai_rules (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     rules_text TEXT NOT NULL,
@@ -293,6 +308,71 @@ class Database:
             await connection.commit()
         return pnl
 
+    async def add_to_trade(
+        self,
+        trade_id: int,
+        price_usd: float,
+        amount_sol: float,
+        token_quantity: float,
+        snapshot: Dict[str, Any],
+        rationale: str,
+    ) -> float:
+        """Blend an additional paper buy into one open trade and return avg price."""
+
+        if price_usd <= 0 or amount_sol <= 0 or token_quantity <= 0:
+            raise DatabaseError("Add-on price, amount, and quantity must be positive.")
+        created_at = isoformat_utc()
+        async with self._connect() as connection:
+            await connection.execute("BEGIN IMMEDIATE")
+            cursor = await connection.execute(
+                "SELECT * FROM trade_history WHERE id = ? AND status = 'OPEN'",
+                (trade_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                await connection.rollback()
+                raise DatabaseError("Open trade {0} was not found.".format(trade_id))
+            cursor = await connection.execute("SELECT balance FROM wallet WHERE id = 1")
+            wallet = await cursor.fetchone()
+            balance = float(wallet["balance"]) if wallet else DEFAULT_BALANCE
+            if balance < amount_sol:
+                await connection.rollback()
+                raise InsufficientBalanceError("Dummy balance is insufficient.")
+            new_amount = float(row["entry_amount_sol"]) + amount_sol
+            new_quantity = float(row["token_quantity"]) + token_quantity
+            avg_price = new_amount / new_quantity
+            await connection.execute(
+                """
+                UPDATE trade_history
+                SET buy_price = ?, entry_amount_sol = ?, token_quantity = ?
+                WHERE id = ?
+                """,
+                (avg_price, new_amount, new_quantity, trade_id),
+            )
+            await connection.execute(
+                """
+                INSERT INTO trade_additions(
+                    trade_id, price_usd, amount_sol, token_quantity,
+                    snapshot_json, rationale, created_at
+                ) VALUES(?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trade_id,
+                    price_usd,
+                    amount_sol,
+                    token_quantity,
+                    json.dumps(snapshot, sort_keys=True),
+                    rationale,
+                    created_at,
+                ),
+            )
+            await connection.execute(
+                "UPDATE wallet SET balance = ? WHERE id = 1",
+                (balance - amount_sol,),
+            )
+            await connection.commit()
+        return avg_price
+
     async def update_trade_status(
         self,
         trade_id: int,
@@ -363,6 +443,21 @@ class Database:
             sql += " LIMIT ?"
             params = (limit,)
         return await self._fetch_trades(sql, params)
+
+    async def get_trade_additions(self, trade_id: int) -> List[Dict[str, Any]]:
+        """Return add-on buys for one trade, newest first."""
+
+        async with self._connect() as connection:
+            cursor = await connection.execute(
+                """
+                SELECT * FROM trade_additions
+                WHERE trade_id = ?
+                ORDER BY created_at DESC, id DESC
+                """,
+                (trade_id,),
+            )
+            rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
 
     async def _fetch_trades(
         self, sql: str, params: Iterable[Any] = ()
@@ -546,6 +641,45 @@ class Database:
                 max_trade_amount_sol=float(
                     stored.get(
                         "max_trade_amount_sol", defaults.max_trade_amount_sol
+                    )
+                ),
+                blocked_entry_utc_hours=str(
+                    stored.get(
+                        "blocked_entry_utc_hours",
+                        defaults.blocked_entry_utc_hours,
+                    )
+                ),
+                min_buy_sell_ratio=float(
+                    stored.get("min_buy_sell_ratio", defaults.min_buy_sell_ratio)
+                ),
+                min_volume_liquidity_ratio_5m=float(
+                    stored.get(
+                        "min_volume_liquidity_ratio_5m",
+                        defaults.min_volume_liquidity_ratio_5m,
+                    )
+                ),
+                max_top_holder_share_pct=float(
+                    stored.get(
+                        "max_top_holder_share_pct",
+                        defaults.max_top_holder_share_pct,
+                    )
+                ),
+                max_momentum_5m_pct=float(
+                    stored.get("max_momentum_5m_pct", defaults.max_momentum_5m_pct)
+                ),
+                momentum_exhaustion_min_buy_sell_ratio=float(
+                    stored.get(
+                        "momentum_exhaustion_min_buy_sell_ratio",
+                        defaults.momentum_exhaustion_min_buy_sell_ratio,
+                    )
+                ),
+                max_buy_more_count=int(
+                    stored.get("max_buy_more_count", defaults.max_buy_more_count)
+                ),
+                buy_more_cooldown_seconds=float(
+                    stored.get(
+                        "buy_more_cooldown_seconds",
+                        defaults.buy_more_cooldown_seconds,
                     )
                 ),
             )
